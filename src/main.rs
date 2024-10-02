@@ -23,7 +23,7 @@ enum Direction {
     West,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Location(usize, usize);
 
 #[derive(Copy, Clone)]
@@ -41,6 +41,23 @@ struct BefungeProgram {
     width: usize,
 }
 
+impl std::fmt::Debug for BefungeProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Point")
+            .field(
+                "Chars",
+                &self
+                    .chars
+                    .chunks(self.width)
+                    .map(|x| x.iter().map(|x| *x as char).collect::<Vec<char>>())
+                    .collect::<Vec<Vec<char>>>(),
+            )
+            .field("Height", &self.height)
+            .field("Width", &self.width)
+            .finish()
+    }
+}
+
 impl BefungeProgram {
     fn new(str: &str) -> Self {
         let mut state = Vec::new();
@@ -51,12 +68,14 @@ impl BefungeProgram {
             if width.is_none() {
                 width = Some(chars.len());
             };
+
+            chars.resize(width.unwrap(), b' ');
             state.append(&mut chars)
         }
         Self {
-            height: state.len(),
+            height: (state.len() - 1) / width.unwrap(),
             chars: state,
-            width: width.unwrap(),
+            width: width.unwrap() - 1,
         }
     }
 
@@ -64,7 +83,7 @@ impl BefungeProgram {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("location out of bounds :(")
         } else {
-            return self.chars[loc.0 + loc.1 * self.width];
+            return self.chars[loc.0 + loc.1 * (self.width + 1)];
         }
     }
 
@@ -72,17 +91,41 @@ impl BefungeProgram {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("location out of bounds :(")
         } else {
-            self.chars[loc.0 + loc.1 * self.width] = value;
+            self.chars[loc.0 + loc.1 * (self.width + 1)] = value;
         };
     }
 
     fn step(&self, dir: Direction, loc: Location) -> Location {
         // TODO: wrapping
         match dir {
-            Direction::North => Location(loc.0, loc.1 - 1),
-            Direction::South => Location(loc.0, loc.1 + 1),
-            Direction::East => Location(loc.0 + 1, loc.1),
-            Direction::West => Location(loc.0 - 1, loc.1),
+            Direction::North => {
+                if loc.1 == 0 {
+                    Location(loc.0, self.height - 1)
+                } else {
+                    Location(loc.0, loc.1 - 1)
+                }
+            }
+            Direction::South => {
+                if loc.1 >= self.height {
+                    Location(loc.0, 0)
+                } else {
+                    Location(loc.0, loc.1 + 1)
+                }
+            }
+            Direction::East => {
+                if loc.0 >= self.width {
+                    Location(0, loc.1)
+                } else {
+                    Location(loc.0 + 1, loc.1)
+                }
+            }
+            Direction::West => {
+                if loc.0 == 0 {
+                    Location(self.width - 1, loc.1)
+                } else {
+                    Location(loc.0 - 1, loc.1)
+                }
+            }
         }
     }
 }
@@ -307,44 +350,60 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn multiplication(&self) {
-        panic!("no impled yet D:")
+        panic!("multiplication not implemented yet!");
     }
     fn division(&self) {
-        panic!("no impled yet D:")
+        panic!("division not implemented yet!");
     }
     fn modulo(&self) {
-        panic!("no impled yet D:")
+        let a = self.pop_stack();
+        let b = self.pop_stack();
+        // FIXME: check what to do on negative/zero b!!
+        let res = self.builder.build_int_signed_rem(b, a, "res").unwrap();
+        self.push_stack(res);
     }
     fn not(&self) {
-        panic!("no impled yet D:")
+        let a = self.pop_stack();
+        let one = self.context.i8_type().const_int(1, false);
+        let a = self.builder.build_and(a, one, "a").unwrap();
+        let res = self.builder.build_xor(a, one, "res").unwrap();
+        self.push_stack(res);
     }
     fn greater_than(&self) {
-        panic!("no impled yet D:")
+        panic!("greater_than not implemented yet!");
     }
     fn duplicate(&self) {
-        panic!("no impled yet D:")
+        let a = self.peek_stack();
+        self.push_stack(a);
     }
     fn swap(&self) {
-        panic!("no impled yet D:")
+        panic!("swap not implemented yet!");
     }
     fn pop_and_discard(&self) {
-        panic!("no impled yet D:")
+        self.pop_stack();
     }
 
-    // put
-    fn put(&self) {
+    // return
+
+    fn return_pop_three(&self) {
+        let i64_type = self.context.i64_type();
         let y = self.pop_stack();
+        let y = self.builder.build_int_z_extend(y, i64_type, "y").unwrap();
+
         let x = self.pop_stack();
-        let value = self.pop_stack();
+        let x = self.builder.build_int_z_extend(x, i64_type, "x").unwrap();
+
+        let val = self.pop_stack();
+        let value = self.builder.build_int_z_extend(val, i64_type, "v").unwrap();
 
         // BIT PACK YEAAAAA!!
         // pack format: first 8 bits y, then x, then value
         // so y << 0, x << 8, value << 16
 
-        let eight = self.context.i8_type().const_int(8, false);
+        let eight = self.context.i64_type().const_int(8, false);
         let x = self.builder.build_left_shift(x, eight, "x").unwrap();
 
-        let sixteen = self.context.i8_type().const_int(16, false);
+        let sixteen = self.context.i64_type().const_int(16, false);
         let value = self.builder.build_left_shift(value, sixteen, "v").unwrap();
 
         let res = self.builder.build_int_add(y, x, "res").unwrap();
@@ -352,14 +411,29 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.build_return(Some(&res)).unwrap();
     }
 
-    // return
+    fn return_pop_two(&self) {
+        let i64_type = self.context.i64_type();
+        let y = self.pop_stack();
+        let y = self.builder.build_int_z_extend(y, i64_type, "y").unwrap();
 
-    fn return_pop_stack(&self) {
         let x = self.pop_stack();
-        let x = self
-            .builder
-            .build_int_s_extend(x, self.context.i64_type(), "res")
-            .unwrap();
+        let x = self.builder.build_int_z_extend(x, i64_type, "x").unwrap();
+
+        // pack format: first 8 bits y, then x
+        // so y << 0, x << 8
+
+        let eight = self.context.i64_type().const_int(8, false);
+        let x = self.builder.build_left_shift(x, eight, "x").unwrap();
+
+        let res = self.builder.build_int_add(y, x, "res").unwrap();
+        self.builder.build_return(Some(&res)).unwrap();
+    }
+
+    fn return_pop_one(&self) {
+        let i64_type = self.context.i64_type();
+        let x = self.pop_stack();
+        let x = self.builder.build_int_z_extend(x, i64_type, "x").unwrap();
+
         self.builder.build_return(Some(&x)).unwrap();
     }
 
@@ -376,7 +450,7 @@ impl<'ctx> CodeGen<'ctx> {
             // that func is cacheable baybee :)
             let status;
             unsafe { status = func.call() };
-            println!("status: {}, char: '{}'", status, last_char as char);
+            println!("status: {}, char: '{}'", status as u8, last_char as char);
             match last_char {
                 b'@' => {
                     return;
@@ -385,6 +459,7 @@ impl<'ctx> CodeGen<'ctx> {
                     befunge_state.direction = rand::random();
                 }
                 b'_' => {
+                    let status = status as u8;
                     if status == 0 {
                         befunge_state.direction = Direction::East
                     } else {
@@ -393,6 +468,7 @@ impl<'ctx> CodeGen<'ctx> {
                     befunge_state.step();
                 }
                 b'|' => {
+                    let status = status as u8;
                     if status == 0 {
                         befunge_state.direction = Direction::South
                     } else {
@@ -405,11 +481,35 @@ impl<'ctx> CodeGen<'ctx> {
                     let y = status as u8;
                     let x = (status >> 8) as u8;
                     let value = (status >> 16) as u8;
+                    println!("y: {y}, x: {x}, v: {value}, full: {status:024b}");
 
                     // TODO: invalidate cache here
                     befunge_state
                         .program
-                        .set(&Location(x as usize, y as usize), value)
+                        .set(&Location(x as usize, y as usize), value);
+                    befunge_state.step();
+                }
+                b'g' => {
+                    // in this situation status is bit packed
+                    let y = status as u8;
+                    let x = (status >> 8) as u8;
+
+                    let val = befunge_state.program.get(&Location(x as usize, y as usize));
+                    befunge_state.step();
+
+                    // TODO: figure out a less horrifying way to put the data back into the JIT's state
+                    let module = self.context.create_module("befunger");
+                    self.execution_engine.add_module(&module).unwrap();
+                    let fn_type = self.context.void_type().fn_type(&[], false);
+
+                    // FIXME: safety last, chance of name collision is lowTM ;)
+                    let func_name = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+                    let function = module.add_function(&func_name, fn_type, None);
+                    let basic_block = self.context.append_basic_block(function, "entry");
+                    self.builder.position_at_end(basic_block);
+
+                    let val = self.context.i8_type().const_int(val as u64, false);
+                    self.push_stack(val)
                 }
                 _ => (),
             }
@@ -436,7 +536,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         loop {
             char = befunge_state.program.get(&befunge_state.location);
-            //println!("op: {}", char as char);
+            println!("op: {}, loc: {:?}", char as char, befunge_state.location);
             match char {
                 // TODO: rest o the numbers :)
                 b'0'..=b'9' => self.push_static_number((char - b'0') as u64),
@@ -464,25 +564,32 @@ impl<'ctx> CodeGen<'ctx> {
                 // logic for where to go is handled later because the JIT
                 // doesn't know about runtime state
                 b'?' | b'_' | b'|' => {
-                    self.return_pop_stack();
+                    self.return_pop_one();
                     break;
                 }
 
                 // string mode
-                b'"' => panic!("unimplemented"),
+                b'"' => panic!("unimplemented str"),
 
                 // put (this is the big one!)
-                b'p' => self.put(),
+                b'p' => {
+                    self.return_pop_three();
+                    break;
+                }
+
                 // get
-                b'g' => panic!("unimplemented"),
+                b'g' => {
+                    self.return_pop_two();
+                    break;
+                }
 
                 // input
-                b'&' => panic!("unimplemented"),
-                b'~' => panic!("unimplemented"),
+                b'&' => panic!("unimplemented &"),
+                b'~' => panic!("unimplemented ~"),
 
                 // output
-                b'.' => panic!("unimplemented"),
-                b',' => panic!("unimplemented"),
+                b'.' => panic!("unimplemented ."),
+                b',' => panic!("unimplemented ,"),
 
                 // halt
                 b'@' => {
@@ -501,10 +608,12 @@ impl<'ctx> CodeGen<'ctx> {
             //self.printf_int(res);
         }
 
-        println!(
-            "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
-            module.print_to_string().to_string()
-        );
+        //println!(
+        //    "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
+        //    module.print_to_string().to_string()
+        //);
+
+        //println!("{:?}", befunge_state.program);
 
         let func: JitFunction<BefungeFunc>;
         unsafe {
@@ -537,13 +646,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     */
 
     let x = r#"
-2 2 +v
-@ _+4<"#
+4 >:               :2%!#v_v >10g\%!#v_:10g2/`!#v_$               :.  55+,v     // only for primes > 3
+  +                 v%3:>#<#^ #<    >            $                       v 
+  1                 > !#^_10p7:^:+6_^#%\g01-2: <                          
+                                                                          
+                                                                          
+                                                                          
+  ^                                                                      <
+
+
+
+
+
+stack  ->  stack                 // only for primes > 3
+
+
+:2%!#v_v >10g\%!#v_:10g2/`!#v_$    1    @
+ v%3:>#<#^ #<    >            $    0    @
+ > !#^_10p7:^:+6_^#%\g01-2: <  "#
         .chars()
         .skip(1)
         .collect::<String>(); //skip first line :)
                               //
     let befunge = BefungeState::new(&x);
+    println!(
+        "{}, {}",
+        befunge.program.get(&Location(100, 0)) as char,
+        befunge.program.get(&Location(0, 1)) as char
+    );
     codegen.jit_befunge(befunge);
 
     return Ok(());
