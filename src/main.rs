@@ -3,7 +3,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
-use inkwell::values::{FunctionValue, IntValue, PointerValue};
+use inkwell::values::{AsValueRef, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use rand::distributions::{Alphanumeric, DistString};
 
@@ -26,9 +26,9 @@ struct BefungeReturn(u64, u64, u64);
 
 type BefungeFunc = unsafe extern "C" fn() -> *const BefungeReturn;
 
-struct FunctionEffects<'a> {
+struct FunctionEffects {
     last_char: u8,
-    func: JitFunction<'a, BefungeFunc>,
+    func: BefungeFunc,
     state_after: BefungeState,
 }
 
@@ -61,18 +61,18 @@ struct CodeGen<'ctx> {
 /// GENERAL UTILITY
 impl<'ctx> CodeGen<'ctx> {
     fn prelude(&self) {
-        let i8_type = self.context.i8_type();
-        let stack_type = i8_type.vec_type(STACK_SIZE as u32);
+        let i64_type = self.context.i64_type();
+        let stack_type = i64_type.vec_type(STACK_SIZE as u32);
         let i64_type = self.context.i64_type();
         let status_type = self
             .context
             .struct_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
 
-        let zero = i8_type.const_int(0, false);
+        let zero = i64_type.const_int(0, false);
         let stack_zero = stack_type.const_zero();
         let status_zero = status_type.const_zero();
 
-        let ptr = self.module.add_global(i8_type, None, "stack_counter");
+        let ptr = self.module.add_global(i64_type, None, "stack_counter");
         ptr.set_initializer(&zero);
 
         let stack = self.module.add_global(stack_type, None, "stack");
@@ -133,14 +133,14 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn increment_stack_counter(&self) {
-        let i8_type = self.context.i8_type();
-        let one = i8_type.const_int(1, false);
+        let i64_type = self.context.i64_type();
+        let one = i64_type.const_int(1, false);
 
         let ptr = self.get_stack_counter_ptr();
 
         let stack_counter = self
             .builder
-            .build_load(i8_type, ptr, "count")
+            .build_load(i64_type, ptr, "count")
             .unwrap()
             .into_int_value();
 
@@ -153,14 +153,14 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn decrement_stack_counter(&self) {
-        let i8_type = self.context.i8_type();
-        let minus_one = i8_type.const_int(u64::MAX, false); // ;)
+        let i64_type = self.context.i64_type();
+        let minus_one = i64_type.const_int(u64::MAX, false); // ;)
 
         let ptr = self.get_stack_counter_ptr();
 
         let stack_counter = self
             .builder
-            .build_load(i8_type, ptr, "count")
+            .build_load(i64_type, ptr, "count")
             .unwrap()
             .into_int_value();
 
@@ -173,15 +173,15 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn peek_ptr(&self) -> PointerValue<'_> {
-        let i8_type = self.context.i8_type();
-        let stack_type = i8_type.vec_type(STACK_SIZE as u32);
-        let zero = i8_type.const_zero();
+        let i64_type = self.context.i64_type();
+        let stack_type = i64_type.vec_type(STACK_SIZE as u32);
+        let zero = i64_type.const_zero();
 
         let stack_ptr = self.get_stack_ptr();
         let counter_ptr = self.get_stack_counter_ptr();
         let counter = self
             .builder
-            .build_load(i8_type, counter_ptr, "count")
+            .build_load(i64_type, counter_ptr, "count")
             .unwrap()
             .into_int_value();
 
@@ -193,12 +193,12 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn peek_stack(&self) -> IntValue<'_> {
-        let i8_type = self.context.i8_type();
+        let i64_type = self.context.i64_type();
         let ptr = self.peek_ptr();
 
         let res = self
             .builder
-            .build_load(i8_type, ptr, "stack_val")
+            .build_load(i64_type, ptr, "stack_val")
             .unwrap()
             .into_int_value();
 
@@ -224,9 +224,9 @@ impl<'ctx> CodeGen<'ctx> {
 impl<'ctx> CodeGen<'ctx> {
     // numbers
 
-    fn push_static_number(&self, int: u8) {
-        let i8_type = self.context.i8_type();
-        let int = i8_type.const_int(u64::from(int), false);
+    fn push_static_number(&self, int: u64) {
+        let i64_type = self.context.i64_type();
+        let int = i64_type.const_int(u64::from(int), false);
 
         self.push_stack(int);
     }
@@ -274,7 +274,7 @@ impl<'ctx> CodeGen<'ctx> {
     // if zero, set to 1, else set to zero
     fn not(&self, func: FunctionValue) {
         let a = self.pop_stack();
-        let zero = self.context.i8_type().const_zero();
+        let zero = self.context.i64_type().const_zero();
 
         let cond = self
             .builder
@@ -353,7 +353,19 @@ impl<'ctx> CodeGen<'ctx> {
             .context
             .struct_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
 
-        let status = status_type.const_named_struct(&vals.map(std::convert::Into::into));
+        let status = status_type.const_zero();
+        let status = self
+            .builder
+            .build_insert_value(status, vals[0], 0, "out")
+            .unwrap();
+        let status = self
+            .builder
+            .build_insert_value(status, vals[1], 1, "out")
+            .unwrap();
+        let status = self
+            .builder
+            .build_insert_value(status, vals[2], 2, "out")
+            .unwrap();
 
         self.builder.build_store(ptr, status).unwrap();
 
@@ -419,6 +431,7 @@ impl<'ctx> CodeGen<'ctx> {
                 state = cached_state.state_after;
                 cache_count.0 += 1;
             } else {
+                println!("NO CACHEY");
                 let pos = (state.location, state.direction);
                 (func, last_char) = self.jit_one_expression(&program, &mut state);
                 cache.insert(
@@ -432,7 +445,7 @@ impl<'ctx> CodeGen<'ctx> {
                 cache_count.1 += 1;
             }
             //println!("{} cached vs {} uncached", cache_count.0, cache_count.1);
-            let status = unsafe { *func.call() };
+            let status = unsafe { *func() };
             //println!("status: {status:?}, char: '{}'", last_char as char);
             match last_char {
                 b'@' => {
@@ -442,7 +455,7 @@ impl<'ctx> CodeGen<'ctx> {
                     state.direction = rand::random();
                 }
                 b'_' => {
-                    let status = status.0 as u8;
+                    let status = status.0 as u64;
                     if status == 0 {
                         state.direction = Direction::East;
                     } else {
@@ -451,7 +464,7 @@ impl<'ctx> CodeGen<'ctx> {
                     state.step(&program);
                 }
                 b'|' => {
-                    let status = status.0 as u8;
+                    let status = status.0 as u64;
                     if status == 0 {
                         state.direction = Direction::South;
                     } else {
@@ -460,9 +473,9 @@ impl<'ctx> CodeGen<'ctx> {
                     state.step(&program);
                 }
                 b'p' => {
-                    let y = status.0 as u8;
-                    let x = status.1 as u8;
-                    let value = status.2 as u8;
+                    let y = status.0 as u64;
+                    let x = status.1 as u64;
+                    let value = status.2 as u64;
 
                     // TODO: invalidate cache here
                     //cache = HashMap::new();
@@ -470,12 +483,12 @@ impl<'ctx> CodeGen<'ctx> {
                     state.step(&program);
                 }
                 b'g' => {
-                    let y = status.0 as u8;
-                    let x = status.1 as u8;
+                    let y = status.0 as u64;
+                    let x = status.1 as u64;
 
                     let val = program
                         .get(&Location(x as usize, y as usize))
-                        .unwrap_or(b' ');
+                        .unwrap_or(b' '.into());
                     state.step(&program);
 
                     // TODO: figure out a less horrifying way to put the data back into the JIT's state
@@ -490,8 +503,7 @@ impl<'ctx> CodeGen<'ctx> {
                     let basic_block = self.context.append_basic_block(function, "entry");
                     self.builder.position_at_end(basic_block);
 
-                    let val = self.context.i8_type().const_int(u64::from(val), false);
-                    self.push_stack(val);
+                    self.push_static_number(val);
                     self.builder.build_return(None).unwrap();
                     unsafe { self.execution_engine.run_function(function, &[]) };
                 }
@@ -504,7 +516,7 @@ impl<'ctx> CodeGen<'ctx> {
         &self,
         program: &BefungeProgram,
         state: &mut BefungeState,
-    ) -> (JitFunction<BefungeFunc>, u8) {
+    ) -> (BefungeFunc, u8) {
         let module = self.context.create_module("befunger");
         self.execution_engine.add_module(&module).unwrap();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -517,10 +529,12 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.builder.position_at_end(basic_block);
 
-        let mut char;
+        let mut char: u8;
 
         loop {
-            char = program.get_unchecked(&state.location);
+            let maybe_char = program.get_unchecked(&state.location).try_into();
+            // TODO: make not panic!()
+            char = maybe_char.expect("Char should be a valid operation");
             //println!("op: {}, loc: {:?}", char as char, state.location);
             match char {
                 // string mode
@@ -529,14 +543,14 @@ impl<'ctx> CodeGen<'ctx> {
                     loop {
                         state.step(program);
                         let char = program.get_unchecked(&state.location);
-                        if char == b'"' {
+                        if char == b'"'.into() {
                             break;
                         }
                         self.push_static_number(char);
                     }
                 }
 
-                b'0'..=b'9' => self.push_static_number(char - b'0'),
+                b'0'..=b'9' => self.push_static_number((char - b'0').into()),
 
                 // normal operations
                 b'+' => self.addition(),
@@ -601,18 +615,27 @@ impl<'ctx> CodeGen<'ctx> {
             //self.printf_int(self.peek_stack());
         }
 
-        /*
-        println!(
-            "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
-            module.print_to_string().to_string()
-        );
-        */
+        //println!(
+        //    "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
+        //    module.print_to_string().to_string()
+        //);
+        //panic!();
 
         //println!("{:?}", program);
 
-        // want to be able to cache later so cannot use run_function :(
-        //self.execution_engine.run_function(function, &[]);
-        let func = unsafe { self.execution_engine.get_function(&func_name).unwrap() };
+        // inkwell provides no get_function by FunctionValue
+        // so we will just pass around this FunctionValue
+        // and call it ourselves
+        //let x = function.as_value_ref();
+        //unsafe { println!("{:?}", *x) };
+
+        // this is slow as balls
+        let func = unsafe {
+            self.execution_engine
+                .get_function(&func_name)
+                .unwrap()
+                .into_raw()
+        };
 
         (func, char)
     }
@@ -621,7 +644,7 @@ impl<'ctx> CodeGen<'ctx> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = Context::create();
     let module = context.create_module("befunge");
-    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Default)?;
+    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)?;
 
     let codegen = CodeGen {
         context: &context,
@@ -630,12 +653,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         execution_engine,
     };
     codegen.prelude();
-    /*
     println!(
         "-- LLVM IR PRELUDE begin: \n{}-- LLVM IR PRELUDE end:\n",
         codegen.module.print_to_string().to_string()
     );
-    */
     // https://github.com/Mikescher/BefungePrograms?tab=readme-ov-file
     let x = r##"
 0".omed s"v                                          

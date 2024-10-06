@@ -28,6 +28,7 @@
             llvm_18
             libffi
             libxml2
+            linuxPackages_latest.perf
 					];
 					#LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";
 				};

@@ -1,2 +1,6 @@
 /target
 .direnv
+programs
+perf.data
+perf.data.old
+flamegraph.svg

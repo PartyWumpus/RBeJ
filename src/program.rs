@@ -12,11 +12,12 @@ pub enum Direction {
 pub struct Location(pub usize, pub usize);
 
 pub struct BefungeProgram {
-    chars: Vec<u8>,
+    chars: Vec<u64>,
     height: usize,
     width: usize,
 }
 
+/*
 impl std::fmt::Debug for BefungeProgram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Point")
@@ -33,6 +34,7 @@ impl std::fmt::Debug for BefungeProgram {
             .finish()
     }
 }
+*/
 
 impl BefungeProgram {
     pub fn new(str: &str) -> Self {
@@ -46,9 +48,9 @@ impl BefungeProgram {
 
         for line in str.lines() {
             // TODO: catch failures here
-            let mut chars: Vec<u8> = line.chars().map(|x| x as u8).collect();
+            let mut chars: Vec<u64> = line.chars().map(|x| x as u64).collect();
 
-            chars.resize(width, b' ');
+            chars.resize(width, b' '.into());
             state.append(&mut chars);
         }
         Self {
@@ -58,7 +60,7 @@ impl BefungeProgram {
         }
     }
 
-    pub fn get(&self, loc: &Location) -> Option<u8> {
+    pub fn get(&self, loc: &Location) -> Option<u64> {
         if loc.0 > self.width || loc.1 > self.height {
             None
         } else {
@@ -66,7 +68,7 @@ impl BefungeProgram {
         }
     }
 
-    pub fn get_unchecked(&self, loc: &Location) -> u8 {
+    pub fn get_unchecked(&self, loc: &Location) -> u64 {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("get {loc:?} is out of bounds");
         } else {
@@ -74,7 +76,7 @@ impl BefungeProgram {
         }
     }
 
-    pub fn set_if_valid(&mut self, loc: &Location, value: u8) {
+    pub fn set_if_valid(&mut self, loc: &Location, value: u64) {
         if loc.0 > self.width || loc.1 > self.height {
             // if it is out of bounds, we just silently fail
         } else {
