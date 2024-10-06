@@ -1,20 +1,21 @@
 #![allow(clippy::cast_possible_truncation, clippy::needless_raw_string_hashes)]
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::execution_engine::{ExecutionEngine, JitFunction};
+use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
-use inkwell::values::{AsValueRef, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use rand::distributions::{Alphanumeric, DistString};
 
 mod program;
 
-use crate::program::{BefungeProgram, Direction, Location};
-use std::collections::HashMap;
+use crate::program::{Direction, Location, Program};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 // TODO:
 // impl last operators
+// pop zero from stack when empty
 // read from file
 // figure out a good debug info system
 
@@ -48,7 +49,7 @@ impl BefungeState {
         }
     }
 
-    fn step(&mut self, program: &BefungeProgram) {
+    fn step(&mut self, program: &Program) {
         self.location = program.step_with_wrap(self.direction, self.location);
     }
 }
@@ -469,11 +470,14 @@ impl<'ctx> CodeGen<'ctx> {
 
 /// JIT TIME
 impl<'ctx> CodeGen<'ctx> {
-    fn jit_befunge(&self, mut program: BefungeProgram, init_state: Option<BefungeState>) {
+    fn jit_befunge(&self, mut program: Program, init_state: Option<BefungeState>) {
         let put_int = self.get_put_int();
-        let mut cache_count = (0, 0);
-        let mut state = init_state.map_or_else(BefungeState::new, |state| state);
+
+        let mut cache_ratio = (0, 0); // FOR DEBUGGING
+
+        let mut state = init_state.unwrap_or_else(BefungeState::new);
         let mut cache: HashMap<BefungeState, FunctionEffects> = HashMap::new();
+        let mut visited: HashMap<Location, HashSet<BefungeState>> = HashMap::new();
         loop {
             let func;
             let last_char;
@@ -481,11 +485,11 @@ impl<'ctx> CodeGen<'ctx> {
                 func = cached_state.func;
                 last_char = cached_state.last_char;
                 state = cached_state.state_after;
-                cache_count.0 += 1;
+                cache_ratio.0 += 1;
             } else {
                 //println!("generating uncached function");
                 let start_state = state;
-                (func, last_char) = self.jit_one_expression(&program, &mut state);
+                (func, state, last_char) = self.jit_one_expression(&program, state, &mut visited);
                 cache.insert(
                     start_state,
                     FunctionEffects {
@@ -494,7 +498,7 @@ impl<'ctx> CodeGen<'ctx> {
                         state_after: state,
                     },
                 );
-                cache_count.1 += 1;
+                cache_ratio.1 += 1;
             }
             //println!("{} cached vs {} uncached", cache_count.0, cache_count.1);
             let status = unsafe { *func(0) };
@@ -529,9 +533,15 @@ impl<'ctx> CodeGen<'ctx> {
                     let x = status.1;
                     let value = status.2;
 
-                    // TODO: invalidate cache here
-                    //cache = HashMap::new();
-                    program.set_if_valid(&Location(x as usize, y as usize), value);
+                    let loc = Location(x as usize, y as usize);
+                    let success = program.set_if_valid(&loc, value);
+                    if success {
+                        if let Some(visitors) = visited.get(&loc) {
+                            for visitor in visitors {
+                                cache.remove(visitor);
+                            }
+                        };
+                    };
                     state.step(&program);
                 }
                 b'g' => {
@@ -551,13 +561,15 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn jit_one_expression(
         &self,
-        program: &BefungeProgram,
-        state: &mut BefungeState,
-    ) -> (BefungeFunc, u8) {
+        program: &Program,
+        initial_state: BefungeState,
+        visited: &mut HashMap<Location, HashSet<BefungeState>>,
+    ) -> (BefungeFunc, BefungeState, u8) {
+        let mut state = initial_state;
+
         let module = self.context.create_module("befunger");
         self.execution_engine.add_module(&module).unwrap();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i64_type = self.context.i64_type();
 
         // see BefungeFunc
         let fn_type = ptr_type.fn_type(&[], true);
@@ -576,6 +588,17 @@ impl<'ctx> CodeGen<'ctx> {
             // TODO: make not panic!()
             char = maybe_char.expect("Char should be a valid operation");
             //println!("op: {}, loc: {:?}", char as char, state.location);
+            match visited.get_mut(&state.location) {
+                None => {
+                    let mut visitors = HashSet::new();
+                    visitors.insert(initial_state);
+                    visited.insert(state.location, visitors);
+                }
+                Some(visitors) => {
+                    visitors.insert(initial_state);
+                }
+            };
+
             match char {
                 // string mode
                 b'"' => {
@@ -675,7 +698,7 @@ impl<'ctx> CodeGen<'ctx> {
                 .into_raw()
         };
 
-        (func, char)
+        (func, state, char)
     }
 }
 
@@ -698,7 +721,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     // https://github.com/Mikescher/BefungePrograms?tab=readme-ov-file
-    let x = r##"
+    let windmill = r##"
 0".omed s"v                                          
           "                       >v
           i                        8
@@ -731,7 +754,7 @@ $>-66+0p077+0p1^ vp+2g0+67+2g0+56 < pp0+67:0+560<|#<
         .chars()
         .skip(1)
         .collect::<String>(); //skip first line :)
-    let x = r##"
+    let countdown = r##"
 v       vg00p00<
 9    >:.>:.1-: |
 9    *         .
@@ -742,7 +765,7 @@ v       vg00p00<
         .chars()
         .skip(1)
         .collect::<String>();
-    let x = r##"
+    let primes = r##"
 v     works for    0 < n < 1,373,653
  
 
@@ -764,7 +787,8 @@ v     works for    0 < n < 1,373,653
 
 
 "##.chars().skip(1).collect::<String>();
-    let program = BefungeProgram::new(&x);
+    let quine = r##">:# 0# g# ,# 1# +# 0#_ #! _0#1 "this crap writes itself!" #0 #_ #! _#0 :# 3# 5# *# 7# *# #?# %# _@"##;
+    let program = Program::new(&countdown);
 
     codegen.jit_befunge(program, None);
 

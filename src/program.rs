@@ -11,7 +11,7 @@ pub enum Direction {
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Location(pub usize, pub usize);
 
-pub struct BefungeProgram {
+pub struct Program {
     chars: Vec<u64>,
     height: usize,
     width: usize,
@@ -36,7 +36,7 @@ impl std::fmt::Debug for BefungeProgram {
 }
 */
 
-impl BefungeProgram {
+impl Program {
     pub fn new(str: &str) -> Self {
         let mut state = Vec::new();
         let mut width = 0;
@@ -76,13 +76,14 @@ impl BefungeProgram {
         }
     }
 
-    pub fn set_if_valid(&mut self, loc: &Location, value: u64) {
+    pub fn set_if_valid(&mut self, loc: &Location, value: u64) -> bool {
         if loc.0 > self.width || loc.1 > self.height {
             println!("put failed by the wayyy");
-            // if it is out of bounds, we just silently fail
+            false
         } else {
             self.chars[loc.0 + loc.1 * (self.width + 1)] = value;
-        };
+            true
+        }
     }
 
     pub const fn step_with_wrap(&self, dir: Direction, loc: Location) -> Location {
