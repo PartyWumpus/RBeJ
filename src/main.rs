@@ -1,9 +1,9 @@
-use inkwell::builder::{self, Builder};
+#![allow(clippy::cast_possible_truncation, clippy::needless_raw_string_hashes)]
+use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::execution_engine::{ExecutionEngine, FunctionLookupError, JitFunction};
+use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
-use inkwell::types::{BasicType, PointerType};
-use inkwell::values::{AnyValue, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use rand::distributions::{Alphanumeric, DistString};
 
@@ -25,15 +25,6 @@ enum Direction {
 
 #[derive(Copy, Clone, Debug)]
 struct Location(usize, usize);
-
-#[derive(Copy, Clone)]
-enum BefungeStatus {
-    Okay = 0,
-    GoLeft = 2,
-    GoRight = 3,
-    GoUp = 4,
-    GoDown = 5,
-}
 
 struct BefungeProgram {
     chars: Vec<u8>,
@@ -70,7 +61,7 @@ impl BefungeProgram {
             };
 
             chars.resize(width.unwrap(), b' ');
-            state.append(&mut chars)
+            state.append(&mut chars);
         }
         Self {
             height: (state.len() - 1) / width.unwrap(),
@@ -83,7 +74,7 @@ impl BefungeProgram {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("location out of bounds :(")
         } else {
-            return self.chars[loc.0 + loc.1 * (self.width + 1)];
+            self.chars[loc.0 + loc.1 * (self.width + 1)]
         }
     }
 
@@ -95,7 +86,7 @@ impl BefungeProgram {
         };
     }
 
-    fn step(&self, dir: Direction, loc: Location) -> Location {
+    const fn step(&self, dir: Direction, loc: Location) -> Location {
         // TODO: wrapping
         match dir {
             Direction::North => {
@@ -175,34 +166,33 @@ impl<'ctx> CodeGen<'ctx> {
 
         let ptr = self.context.ptr_type(AddressSpace::default());
 
-        let fn_value = self
-            .module
-            .add_function("wahoo", i8_type.fn_type(&[], false), None);
-        let entry = self.context.append_basic_block(fn_value, "entry");
-        self.builder.position_at_end(entry);
-        self.builder.build_return(None).unwrap();
-
-        unsafe {
-            self.builder.build_global_string("%d\n", "int_str").unwrap();
-        }
         let printf_type = self.context.i32_type().fn_type(&[ptr.into()], true);
         self.module.add_function("printf", printf_type, None);
     }
 
-    // %w = getelementptr [1 x i8], [1 x i8]* @int_str, i64 0, i64 0
-    // call i32 (i8*, ...) @printf(i8* %w, i32 %val)
     fn printf_int(&self, int: IntValue) {
-        //let str = self
-        //    .module
-        //    .get_global("int_str")
-        //    .unwrap()
-        //    .as_pointer_value();
-
         let str;
         unsafe {
             str = self
                 .builder
                 .build_global_string("%d\n", "int_str")
+                .unwrap()
+                .as_pointer_value();
+        }
+
+        let printf = self.module.get_function("printf").unwrap();
+
+        self.builder
+            .build_call(printf, &[str.into(), int.into()], "printy")
+            .unwrap();
+    }
+
+    fn printf_char(&self, int: IntValue) {
+        let str;
+        unsafe {
+            str = self
+                .builder
+                .build_global_string("%c\n", "int_str")
                 .unwrap()
                 .as_pointer_value();
         }
@@ -295,7 +285,7 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap()
             .into_int_value();
 
-        return res;
+        res
     }
 
     fn pop_stack(&self) -> IntValue<'_> {
@@ -310,7 +300,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.decrement_stack_counter();
 
-        return res;
+        res
     }
 
     fn push_stack(&self, val: IntValue<'_>) {
@@ -353,7 +343,10 @@ impl<'ctx> CodeGen<'ctx> {
         panic!("multiplication not implemented yet!");
     }
     fn division(&self) {
-        panic!("division not implemented yet!");
+        let a = self.pop_stack();
+        let b = self.pop_stack();
+        let res = self.builder.build_int_signed_div(b, a, "res").unwrap();
+        self.push_stack(res);
     }
     fn modulo(&self) {
         let a = self.pop_stack();
@@ -362,22 +355,70 @@ impl<'ctx> CodeGen<'ctx> {
         let res = self.builder.build_int_signed_rem(b, a, "res").unwrap();
         self.push_stack(res);
     }
-    fn not(&self) {
+    // if zero, set to 1, else set to zero
+    fn not(&self, func: FunctionValue) {
         let a = self.pop_stack();
-        let one = self.context.i8_type().const_int(1, false);
-        let a = self.builder.build_and(a, one, "a").unwrap();
-        let res = self.builder.build_xor(a, one, "res").unwrap();
-        self.push_stack(res);
+        let zero = self.context.i8_type().const_zero();
+
+        let cond = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, a, zero, "iszero")
+            .unwrap();
+
+        let zero_block = self.context.append_basic_block(func, "zero");
+        let not_zero_block = self.context.append_basic_block(func, "not_zero");
+        let cont_block = self.context.append_basic_block(func, "cont");
+
+        self.builder
+            .build_conditional_branch(cond, zero_block, not_zero_block)
+            .unwrap();
+
+        self.builder.position_at_end(zero_block);
+        self.push_static_number(1);
+        self.builder.build_unconditional_branch(cont_block).unwrap();
+
+        self.builder.position_at_end(not_zero_block);
+        self.push_static_number(0);
+        self.builder.build_unconditional_branch(cont_block).unwrap();
+
+        self.builder.position_at_end(cont_block);
     }
-    fn greater_than(&self) {
-        panic!("greater_than not implemented yet!");
+    fn greater_than(&self, func: FunctionValue) {
+        let a = self.pop_stack();
+        let b = self.pop_stack();
+
+        let cond = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGE, b, a, "isgreater")
+            .unwrap();
+
+        let greater_block = self.context.append_basic_block(func, "a_greater");
+        let not_greater_block = self.context.append_basic_block(func, "a_not_greater");
+        let cont_block = self.context.append_basic_block(func, "cont");
+
+        self.builder
+            .build_conditional_branch(cond, greater_block, not_greater_block)
+            .unwrap();
+
+        self.builder.position_at_end(greater_block);
+        self.push_static_number(1);
+        self.builder.build_unconditional_branch(cont_block).unwrap();
+
+        self.builder.position_at_end(not_greater_block);
+        self.push_static_number(0);
+        self.builder.build_unconditional_branch(cont_block).unwrap();
+
+        self.builder.position_at_end(cont_block);
     }
     fn duplicate(&self) {
         let a = self.peek_stack();
         self.push_stack(a);
     }
     fn swap(&self) {
-        panic!("swap not implemented yet!");
+        let a = self.pop_stack();
+        let b = self.pop_stack();
+        self.push_stack(a);
+        self.push_stack(b);
     }
     fn pop_and_discard(&self) {
         self.pop_stack();
@@ -396,7 +437,6 @@ impl<'ctx> CodeGen<'ctx> {
         let val = self.pop_stack();
         let value = self.builder.build_int_z_extend(val, i64_type, "v").unwrap();
 
-        // BIT PACK YEAAAAA!!
         // pack format: first 8 bits y, then x, then value
         // so y << 0, x << 8, value << 16
 
@@ -432,6 +472,8 @@ impl<'ctx> CodeGen<'ctx> {
     fn return_pop_one(&self) {
         let i64_type = self.context.i64_type();
         let x = self.pop_stack();
+        // technically not needed, i can just let llvm pass garbage through the high bits but um
+        // thats dumb
         let x = self.builder.build_int_z_extend(x, i64_type, "x").unwrap();
 
         self.builder.build_return(Some(&x)).unwrap();
@@ -450,7 +492,7 @@ impl<'ctx> CodeGen<'ctx> {
             // that func is cacheable baybee :)
             let status;
             unsafe { status = func.call() };
-            println!("status: {}, char: '{}'", status as u8, last_char as char);
+            //println!("status: {}, char: '{}'", status, last_char as char);
             match last_char {
                 b'@' => {
                     return;
@@ -461,18 +503,18 @@ impl<'ctx> CodeGen<'ctx> {
                 b'_' => {
                     let status = status as u8;
                     if status == 0 {
-                        befunge_state.direction = Direction::East
+                        befunge_state.direction = Direction::East;
                     } else {
-                        befunge_state.direction = Direction::West
+                        befunge_state.direction = Direction::West;
                     }
                     befunge_state.step();
                 }
                 b'|' => {
                     let status = status as u8;
                     if status == 0 {
-                        befunge_state.direction = Direction::South
+                        befunge_state.direction = Direction::South;
                     } else {
-                        befunge_state.direction = Direction::North
+                        befunge_state.direction = Direction::North;
                     }
                     befunge_state.step();
                 }
@@ -481,7 +523,11 @@ impl<'ctx> CodeGen<'ctx> {
                     let y = status as u8;
                     let x = (status >> 8) as u8;
                     let value = (status >> 16) as u8;
-                    println!("y: {y}, x: {x}, v: {value}, full: {status:024b}");
+                    //println!("PUT: y: {y}, x: {x}, v: {value}, full: {status:024b}");
+                    //println!(
+                    //    "{}",
+                    //    befunge_state.program.get(&Location(x as usize, y as usize))
+                    //);
 
                     // TODO: invalidate cache here
                     befunge_state
@@ -493,6 +539,12 @@ impl<'ctx> CodeGen<'ctx> {
                     // in this situation status is bit packed
                     let y = status as u8;
                     let x = (status >> 8) as u8;
+
+                    //println!("GET: y: {y}, x: {x}, full: {status:016b}");
+                    //println!(
+                    //    "{}",
+                    //    befunge_state.program.get(&Location(x as usize, y as usize))
+                    //);
 
                     let val = befunge_state.program.get(&Location(x as usize, y as usize));
                     befunge_state.step();
@@ -508,8 +560,10 @@ impl<'ctx> CodeGen<'ctx> {
                     let basic_block = self.context.append_basic_block(function, "entry");
                     self.builder.position_at_end(basic_block);
 
-                    let val = self.context.i8_type().const_int(val as u64, false);
-                    self.push_stack(val)
+                    let val = self.context.i8_type().const_int(u64::from(val), false);
+                    self.push_stack(val);
+                    self.builder.build_return(None).unwrap();
+                    unsafe { self.execution_engine.run_function(function, &[]) };
                 }
                 _ => (),
             }
@@ -536,10 +590,10 @@ impl<'ctx> CodeGen<'ctx> {
 
         loop {
             char = befunge_state.program.get(&befunge_state.location);
-            println!("op: {}, loc: {:?}", char as char, befunge_state.location);
+            //println!("op: {}, loc: {:?}", char as char, befunge_state.location);
             match char {
                 // TODO: rest o the numbers :)
-                b'0'..=b'9' => self.push_static_number((char - b'0') as u64),
+                b'0'..=b'9' => self.push_static_number(u64::from(char - b'0')),
 
                 // normal operations
                 b'+' => self.addition(),
@@ -547,8 +601,8 @@ impl<'ctx> CodeGen<'ctx> {
                 b'*' => self.multiplication(),
                 b'/' => self.division(),
                 b'%' => self.modulo(),
-                b'!' => self.not(),
-                b'`' => self.greater_than(),
+                b'!' => self.not(function),
+                b'`' => self.greater_than(function),
                 b':' => self.duplicate(),
                 b'\\' => self.swap(),
                 b'$' => self.pop_and_discard(),
@@ -588,8 +642,8 @@ impl<'ctx> CodeGen<'ctx> {
                 b'~' => panic!("unimplemented ~"),
 
                 // output
-                b'.' => panic!("unimplemented ."),
-                b',' => panic!("unimplemented ,"),
+                b'.' => self.printf_int(self.pop_stack()),
+                b',' => self.printf_char(self.pop_stack()),
 
                 // halt
                 b'@' => {
@@ -604,14 +658,14 @@ impl<'ctx> CodeGen<'ctx> {
             }
             befunge_state.step();
             // TODO: put a debug info here
-            //let res = self.peek_stack();
-            //self.printf_int(res);
+            //self.printf_int(self.peek_stack());
         }
 
-        //println!(
-        //    "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
-        //    module.print_to_string().to_string()
-        //);
+        /*
+        println!(
+            "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
+            module.print_to_string().to_string()
+        );*/
 
         //println!("{:?}", befunge_state.program);
 
@@ -622,7 +676,7 @@ impl<'ctx> CodeGen<'ctx> {
             func = self.execution_engine.get_function(&func_name).unwrap();
         }
 
-        return (func, char);
+        (func, char)
     }
 }
 
@@ -667,14 +721,9 @@ stack  ->  stack                 // only for primes > 3
         .chars()
         .skip(1)
         .collect::<String>(); //skip first line :)
-                              //
     let befunge = BefungeState::new(&x);
-    println!(
-        "{}, {}",
-        befunge.program.get(&Location(100, 0)) as char,
-        befunge.program.get(&Location(0, 1)) as char
-    );
+
     codegen.jit_befunge(befunge);
 
-    return Ok(());
+    Ok(())
 }
