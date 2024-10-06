@@ -7,11 +7,11 @@ use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use rand::distributions::{Alphanumeric, DistString};
 
+mod program;
+
+use crate::program::{BefungeProgram, Direction, Location};
 use std::collections::HashMap;
 use std::error::Error;
-
-#[macro_use]
-extern crate rand_derive2;
 
 // TODO:
 // impl last operators
@@ -26,115 +26,10 @@ struct BefungeReturn(u64, u64, u64);
 
 type BefungeFunc = unsafe extern "C" fn() -> *const BefungeReturn;
 
-#[derive(Copy, Clone, Debug, RandGen, Hash, PartialEq, Eq)]
-enum Direction {
-    North,
-    South,
-    East,
-    West,
-}
-
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-struct Location(usize, usize);
-
 struct FunctionEffects<'a> {
     last_char: u8,
     func: JitFunction<'a, BefungeFunc>,
     state_after: BefungeState,
-}
-
-struct BefungeProgram {
-    chars: Vec<u8>,
-    height: usize,
-    width: usize,
-}
-
-impl std::fmt::Debug for BefungeProgram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Point")
-            .field(
-                "Chars",
-                &self
-                    .chars
-                    .chunks(self.width)
-                    .map(|x| x.iter().map(|x| *x as char).collect::<Vec<char>>())
-                    .collect::<Vec<Vec<char>>>(),
-            )
-            .field("Height", &self.height)
-            .field("Width", &self.width)
-            .finish()
-    }
-}
-
-impl BefungeProgram {
-    fn new(str: &str) -> Self {
-        let mut state = Vec::new();
-        let mut width = None;
-        for line in str.lines() {
-            // TODO: catch failures here
-            let mut chars: Vec<u8> = line.chars().map(|x| x as u8).collect();
-            if width.is_none() {
-                width = Some(chars.len());
-            };
-
-            chars.resize(width.unwrap(), b' ');
-            state.append(&mut chars);
-        }
-        Self {
-            height: (state.len() - 1) / width.unwrap(),
-            chars: state,
-            width: width.unwrap() - 1,
-        }
-    }
-
-    fn get(&self, loc: &Location) -> u8 {
-        if loc.0 > self.width || loc.1 > self.height {
-            panic!("location {loc:?} out of bounds :(");
-        } else {
-            self.chars[loc.0 + loc.1 * (self.width + 1)]
-        }
-    }
-
-    fn set(&mut self, loc: &Location, value: u8) {
-        if loc.0 > self.width || loc.1 > self.height {
-            panic!("location {loc:?} out of bounds :(");
-        } else {
-            self.chars[loc.0 + loc.1 * (self.width + 1)] = value;
-        };
-    }
-
-    const fn step(&self, dir: Direction, loc: Location) -> Location {
-        match dir {
-            Direction::North => {
-                if loc.1 == 0 {
-                    Location(loc.0, self.height - 1)
-                } else {
-                    Location(loc.0, loc.1 - 1)
-                }
-            }
-            Direction::South => {
-                if loc.1 >= self.height {
-                    Location(loc.0, 0)
-                } else {
-                    Location(loc.0, loc.1 + 1)
-                }
-            }
-            Direction::East => {
-                if loc.0 >= self.width {
-                    Location(0, loc.1)
-                } else {
-                    Location(loc.0 + 1, loc.1)
-                }
-            }
-            Direction::West => {
-                if loc.0 == 0 {
-                    Location(self.width - 1, loc.1)
-                } else {
-                    Location(loc.0 - 1, loc.1)
-                }
-            }
-        }
-    }
 }
 
 #[derive(Copy, Clone)]
@@ -152,7 +47,7 @@ impl BefungeState {
     }
 
     fn step(&mut self, program: &BefungeProgram) {
-        self.location = program.step(self.direction, self.location);
+        self.location = program.step_with_wrap(self.direction, self.location);
     }
 }
 
@@ -163,9 +58,8 @@ struct CodeGen<'ctx> {
     execution_engine: ExecutionEngine<'ctx>,
 }
 
+/// GENERAL UTILITY
 impl<'ctx> CodeGen<'ctx> {
-    /// GENERAL UTILITY
-
     fn prelude(&self) {
         let i8_type = self.context.i8_type();
         let stack_type = i8_type.vec_type(STACK_SIZE as u32);
@@ -324,9 +218,10 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.builder.build_store(ptr, val).unwrap();
     }
+}
 
-    /// OPERATIONS
-
+/// OPERATIONS
+impl<'ctx> CodeGen<'ctx> {
     // numbers
 
     fn push_static_number(&self, int: u8) {
@@ -360,12 +255,14 @@ impl<'ctx> CodeGen<'ctx> {
         let res = self.builder.build_int_mul(b, a, "mult").unwrap();
         self.push_stack(res);
     }
+
     fn division(&self) {
         let a = self.pop_stack();
         let b = self.pop_stack();
         let res = self.builder.build_int_signed_div(b, a, "div").unwrap();
         self.push_stack(res);
     }
+
     fn modulo(&self) {
         let a = self.pop_stack();
         let b = self.pop_stack();
@@ -373,6 +270,7 @@ impl<'ctx> CodeGen<'ctx> {
         let res = self.builder.build_int_signed_rem(b, a, "modulo").unwrap();
         self.push_stack(res);
     }
+
     // if zero, set to 1, else set to zero
     fn not(&self, func: FunctionValue) {
         let a = self.pop_stack();
@@ -401,6 +299,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.builder.position_at_end(cont_block);
     }
+
     fn greater_than(&self, func: FunctionValue) {
         let a = self.pop_stack();
         let b = self.pop_stack();
@@ -428,16 +327,19 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.builder.position_at_end(cont_block);
     }
+
     fn duplicate(&self) {
         let a = self.peek_stack();
         self.push_stack(a);
     }
+
     fn swap(&self) {
         let a = self.pop_stack();
         let b = self.pop_stack();
         self.push_stack(a);
         self.push_stack(b);
     }
+
     fn pop_and_discard(&self) {
         self.pop_stack();
     }
@@ -500,9 +402,10 @@ impl<'ctx> CodeGen<'ctx> {
         let zero = self.context.i64_type().const_zero();
         self.return_data(&[zero, zero, zero]);
     }
+}
 
-    /// JIT TIME
-
+/// JIT TIME
+impl<'ctx> CodeGen<'ctx> {
     fn jit_befunge(&self, mut program: BefungeProgram, init_state: Option<BefungeState>) {
         let mut cache_count = (0, 0);
         let mut state = init_state.map_or_else(BefungeState::new, |state| state);
@@ -563,14 +466,16 @@ impl<'ctx> CodeGen<'ctx> {
 
                     // TODO: invalidate cache here
                     //cache = HashMap::new();
-                    program.set(&Location(x as usize, y as usize), value);
+                    program.set_if_valid(&Location(x as usize, y as usize), value);
                     state.step(&program);
                 }
                 b'g' => {
                     let y = status.0 as u8;
                     let x = status.1 as u8;
 
-                    let val = program.get(&Location(x as usize, y as usize));
+                    let val = program
+                        .get(&Location(x as usize, y as usize))
+                        .unwrap_or(b' ');
                     state.step(&program);
 
                     // TODO: figure out a less horrifying way to put the data back into the JIT's state
@@ -615,7 +520,7 @@ impl<'ctx> CodeGen<'ctx> {
         let mut char;
 
         loop {
-            char = program.get(&state.location);
+            char = program.get_unchecked(&state.location);
             //println!("op: {}, loc: {:?}", char as char, state.location);
             match char {
                 // string mode
@@ -623,7 +528,7 @@ impl<'ctx> CodeGen<'ctx> {
                     // read all characters directly onto stack until next "
                     loop {
                         state.step(program);
-                        let char = program.get(&state.location);
+                        let char = program.get_unchecked(&state.location);
                         if char == b'"' {
                             break;
                         }
@@ -716,7 +621,7 @@ impl<'ctx> CodeGen<'ctx> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = Context::create();
     let module = context.create_module("befunge");
-    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)?;
+    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Default)?;
 
     let codegen = CodeGen {
         context: &context,
@@ -773,9 +678,41 @@ v     v.: <
     .chars()
     .skip(1)
     .collect::<String>();
+    let x = r##"
+v     works for    0 < n < 1,373,653
+ 
+
+
+  v                                                                                                              <<
+                                                                                                                 ,
+                                         >             >             >      >$0v                                 +
+                                                >             >              $1v                                 5
+>0>1+:                              :2\`#^_:2-!#^_:2%!#^_:9\`#^_:3%!#^_:5%!#^_1 :v                               5
+                                    v\                      p13:+1g13:_v#-3 <p1 3<                               .
+                                    >:11p1-0\>:2% !#v_v    v ++!!+1-g< #    ^ <                                  :
+                                             ^\+1\/2< \    >3-#v_$$  1>31g\  !|>                                 |
+                                     vp01p03p04 g11p12<        >:*11v1 >$1   #$^                                 >^
+                                     >120pv        v%g04*<v-1\    %g<^ \!!-1:<$0 
+                                     vg030<  v-1\  < >10g^   >\:::*11  g%1-!\^>^ 
+                                         >$1\> :#v_ $ 21g >:#^_$1-!!  ^
+                                     >:!#^_\1+\2v\ ^_^#!%2/\g03p<
+                                     ^p02*2g02/ <>:*40g%20g2/:20^
+
+
+"##.chars().skip(1).collect::<String>();
     let program = BefungeProgram::new(&x);
 
     codegen.jit_befunge(program, None);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example() {
+        assert_eq!(5, 5);
+    }
 }
