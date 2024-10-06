@@ -78,6 +78,7 @@ impl BefungeProgram {
 
     pub fn set_if_valid(&mut self, loc: &Location, value: u64) {
         if loc.0 > self.width || loc.1 > self.height {
+            println!("put failed by the wayyy");
             // if it is out of bounds, we just silently fail
         } else {
             self.chars[loc.0 + loc.1 * (self.width + 1)] = value;
