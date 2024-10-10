@@ -7,10 +7,14 @@ use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use rand::distributions::{Alphanumeric, DistString};
 
+//use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+//use gxhash::{HashMap, HashSet};
+//use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+
 mod program;
 
 use crate::program::{Direction, Location, Program};
-use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 // TODO:
@@ -39,6 +43,43 @@ struct FunctionEffects {
 struct BefungeState {
     location: Location,
     direction: Direction,
+}
+
+impl BefungeState {
+    fn to_index(&self, program: &Program) -> usize {
+        self.direction as usize + program.calc_index(&self.location) * 4
+    }
+}
+
+struct Cache {
+    data: Vec<Option<FunctionEffects>>,
+}
+
+const NONE: Option<FunctionEffects> = None;
+
+impl Cache {
+    fn new(program: &Program) -> Self {
+        let mut x = Vec::new();
+        x.resize_with(program.width * program.height * 4, || None);
+        Self { data: x }
+    }
+
+    fn get(&self, program: &Program, key: &BefungeState) -> Option<&FunctionEffects> {
+        let index = key.to_index(program);
+        let x = self.data.get(index);
+        match x {
+            Some(val) => val.into(),
+            None => None,
+        }
+    }
+
+    fn set(&mut self, program: &Program, key: BefungeState, val: FunctionEffects) {
+        self.data[key.to_index(program)] = Some(val);
+    }
+
+    fn delete(&mut self, program: &Program, key: &BefungeState) {
+        self.data[key.to_index(program)] = None;
+    }
 }
 
 impl BefungeState {
@@ -476,12 +517,13 @@ impl<'ctx> CodeGen<'ctx> {
         let mut cache_ratio = (0, 0); // FOR DEBUGGING
 
         let mut state = init_state.unwrap_or_else(BefungeState::new);
-        let mut cache: HashMap<BefungeState, FunctionEffects> = HashMap::new();
-        let mut visited: HashMap<Location, HashSet<BefungeState>> = HashMap::new();
+        //let mut cache: HashMap<BefungeState, FunctionEffects> = HashMap::default();
+        let mut cache: Cache = Cache::new(&program);
+        let mut visited: HashMap<Location, HashSet<BefungeState>> = HashMap::default();
         loop {
             let func;
             let last_char;
-            if let Some(cached_state) = cache.get(&state) {
+            if let Some(cached_state) = cache.get(&program, &state) {
                 func = cached_state.func;
                 last_char = cached_state.last_char;
                 state = cached_state.state_after;
@@ -490,7 +532,8 @@ impl<'ctx> CodeGen<'ctx> {
                 //println!("generating uncached function");
                 let start_state = state;
                 (func, state, last_char) = self.jit_one_expression(&program, state, &mut visited);
-                cache.insert(
+                cache.set(
+                    &program,
                     start_state,
                     FunctionEffects {
                         last_char,
@@ -538,7 +581,7 @@ impl<'ctx> CodeGen<'ctx> {
                     if success {
                         if let Some(visitors) = visited.get(&loc) {
                             for visitor in visitors {
-                                cache.remove(visitor);
+                                cache.delete(&program, visitor);
                             }
                         };
                     };
@@ -590,7 +633,7 @@ impl<'ctx> CodeGen<'ctx> {
             //println!("op: {}, loc: {:?}", char as char, state.location);
             match visited.get_mut(&state.location) {
                 None => {
-                    let mut visitors = HashSet::new();
+                    let mut visitors = HashSet::default();
                     visitors.insert(initial_state);
                     visited.insert(state.location, visitors);
                 }
@@ -705,7 +748,7 @@ impl<'ctx> CodeGen<'ctx> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = Context::create();
     let module = context.create_module("befunge");
-    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Default)?;
+    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)?;
 
     let codegen = CodeGen {
         context: &context,
@@ -788,7 +831,8 @@ v     works for    0 < n < 1,373,653
 
 "##.chars().skip(1).collect::<String>();
     let quine = r##">:# 0# g# ,# 1# +# 0#_ #! _0#1 "this crap writes itself!" #0 #_ #! _#0 :# 3# 5# *# 7# *# #?# %# _@"##;
-    let program = Program::new(&countdown);
+    //let program = Program::new(&countdown);
+    let program = Program::new(&primes);
 
     codegen.jit_befunge(program, None);
 

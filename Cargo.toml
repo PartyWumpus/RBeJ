@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ahash = "0.8.11"
+#gxhash = "3.4.1"
 #inkwell = { path = "../inkwell", version = "0.5.0", features = ["llvm18-0"] }
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }
 rand = "0.8.5"
 rand_derive2 = "0.1.21"
+rustc-hash = "2.0.0"
 
 [profile.release]
 debug = true

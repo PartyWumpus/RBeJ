@@ -32,5 +32,8 @@
 					];
 					#LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";
 				};
+        shellHook = ''
+          export RUSTFLAGS='-C target-cpu=native'
+        '';
 			});
 }

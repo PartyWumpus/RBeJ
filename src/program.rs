@@ -1,11 +1,12 @@
 use rand_derive2::RandGen;
+use std::fs;
 
 #[derive(Copy, Clone, Debug, RandGen, Hash, PartialEq, Eq)]
 pub enum Direction {
-    North,
-    South,
-    East,
-    West,
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3,
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -13,8 +14,8 @@ pub struct Location(pub usize, pub usize);
 
 pub struct Program {
     chars: Vec<u64>,
-    height: usize,
-    width: usize,
+    pub height: usize,
+    pub width: usize,
 }
 
 /*
@@ -60,11 +61,21 @@ impl Program {
         }
     }
 
+    fn new_from_file(file_path: &str) -> Self {
+        let str = fs::read_to_string(file_path).expect("Should have been able to read the file");
+        return Self::new(&str);
+    }
+
+    pub fn calc_index(&self, loc: &Location) -> usize {
+        loc.0 + loc.1 * (self.width + 1)
+    }
+
     pub fn get(&self, loc: &Location) -> Option<u64> {
         if loc.0 > self.width || loc.1 > self.height {
             None
         } else {
-            Some(self.chars[loc.0 + loc.1 * (self.width + 1)])
+            let index = self.calc_index(loc);
+            Some(self.chars[index])
         }
     }
 
@@ -72,7 +83,7 @@ impl Program {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("get {loc:?} is out of bounds");
         } else {
-            self.chars[loc.0 + loc.1 * (self.width + 1)]
+            self.chars[self.calc_index(loc)]
         }
     }
 
@@ -81,7 +92,8 @@ impl Program {
             println!("put failed by the wayyy");
             false
         } else {
-            self.chars[loc.0 + loc.1 * (self.width + 1)] = value;
+            let index = self.calc_index(loc);
+            self.chars[index] = value;
             true
         }
     }
