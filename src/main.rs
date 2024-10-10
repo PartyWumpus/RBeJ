@@ -16,15 +16,16 @@ mod program;
 
 use crate::program::{Direction, Location, Program};
 use std::error::Error;
+use std::io;
+use std::io::Read;
 
 // TODO:
-// impl last operators
 // pop zero from stack when empty
 // read from file
 // figure out a good debug info system
 
 const STACK_SIZE: usize = 100;
-const PRINT_LLVM_IR: bool = false;
+const PRINT_LLVM_IR: bool = true;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +61,7 @@ const NONE: Option<FunctionEffects> = None;
 impl Cache {
     fn new(program: &Program) -> Self {
         let mut x = Vec::new();
-        x.resize_with(program.width * program.height * 4, || None);
+        x.resize_with(program.width * (program.height + 1) * 4, || None);
         Self { data: x }
     }
 
@@ -560,7 +561,6 @@ impl<'ctx> CodeGen<'ctx> {
                     } else {
                         state.direction = Direction::West;
                     }
-                    state.step(&program);
                 }
                 b'|' => {
                     let status = status.0;
@@ -569,7 +569,6 @@ impl<'ctx> CodeGen<'ctx> {
                     } else {
                         state.direction = Direction::North;
                     }
-                    state.step(&program);
                 }
                 b'p' => {
                     let y = status.0;
@@ -585,7 +584,6 @@ impl<'ctx> CodeGen<'ctx> {
                             }
                         };
                     };
-                    state.step(&program);
                 }
                 b'g' => {
                     let y = status.0;
@@ -595,10 +593,27 @@ impl<'ctx> CodeGen<'ctx> {
                         .get(&Location(x as usize, y as usize))
                         .unwrap_or(b' '.into());
                     unsafe { put_int(val) };
-                    state.step(&program);
+                }
+                b'&' => {
+                    let mut input_line = String::new();
+                    io::stdin()
+                        .read_line(&mut input_line)
+                        .expect("Failed to read line");
+                    let x: u64 = input_line.trim().parse().expect("Input not an integer");
+                    unsafe { put_int(x) };
+                }
+                b'~' => {
+                    let input = io::stdin()
+                        .bytes()
+                        .next()
+                        .and_then(|result| result.ok())
+                        .map(|byte| byte as u64)
+                        .expect("Input not a character");
+                    unsafe { put_int(input) };
                 }
                 _ => unreachable!(),
             }
+            state.step(&program);
         }
     }
 
@@ -698,8 +713,10 @@ impl<'ctx> CodeGen<'ctx> {
                 }
 
                 // input
-                b'&' => panic!("unimplemented &"),
-                b'~' => panic!("unimplemented ~"),
+                b'&' | b'~' => {
+                    self.return_zero();
+                    break;
+                }
 
                 // output
                 b'.' => self.printf_int(self.pop_stack()),
@@ -727,6 +744,7 @@ impl<'ctx> CodeGen<'ctx> {
                 module.print_to_string().to_string()
             );
         }
+        panic!();
 
         //println!("{:?}", program);
 
@@ -831,8 +849,10 @@ v     works for    0 < n < 1,373,653
 
 "##.chars().skip(1).collect::<String>();
     let quine = r##">:# 0# g# ,# 1# +# 0#_ #! _0#1 "this crap writes itself!" #0 #_ #! _#0 :# 3# 5# *# 7# *# #?# %# _@"##;
+    let wasd = r##">~:,1-,@"##;
     //let program = Program::new(&countdown);
     let program = Program::new(&primes);
+    //let program = Program::new(&wasd);
 
     codegen.jit_befunge(program, None);
 
