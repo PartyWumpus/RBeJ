@@ -63,10 +63,10 @@ impl Program {
 
     fn new_from_file(file_path: &str) -> Self {
         let str = fs::read_to_string(file_path).expect("Should have been able to read the file");
-        return Self::new(&str);
+        Self::new(&str)
     }
 
-    pub fn calc_index(&self, loc: &Location) -> usize {
+    pub const fn calc_index(&self, loc: &Location) -> usize {
         loc.0 + loc.1 * (self.width + 1)
     }
 

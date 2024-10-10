@@ -20,12 +20,12 @@ use std::io;
 use std::io::Read;
 
 // TODO:
-// pop zero from stack when empty
+// pop zero from stack when empty (and don't decrement stack counter)
 // read from file
 // figure out a good debug info system
 
-const STACK_SIZE: usize = 100;
-const PRINT_LLVM_IR: bool = true;
+const STACK_SIZE: usize = 256;
+const PRINT_LLVM_IR: bool = false;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +47,7 @@ struct BefungeState {
 }
 
 impl BefungeState {
-    fn to_index(&self, program: &Program) -> usize {
+    const fn get_index(&self, program: &Program) -> usize {
         self.direction as usize + program.calc_index(&self.location) * 4
     }
 }
@@ -55,8 +55,6 @@ impl BefungeState {
 struct Cache {
     data: Vec<Option<FunctionEffects>>,
 }
-
-const NONE: Option<FunctionEffects> = None;
 
 impl Cache {
     fn new(program: &Program) -> Self {
@@ -66,20 +64,17 @@ impl Cache {
     }
 
     fn get(&self, program: &Program, key: &BefungeState) -> Option<&FunctionEffects> {
-        let index = key.to_index(program);
+        let index = key.get_index(program);
         let x = self.data.get(index);
-        match x {
-            Some(val) => val.into(),
-            None => None,
-        }
+        x.and_then(std::convert::Into::into)
     }
 
     fn set(&mut self, program: &Program, key: BefungeState, val: FunctionEffects) {
-        self.data[key.to_index(program)] = Some(val);
+        self.data[key.get_index(program)] = Some(val);
     }
 
     fn delete(&mut self, program: &Program, key: &BefungeState) {
-        self.data[key.to_index(program)] = None;
+        self.data[key.get_index(program)] = None;
     }
 }
 
@@ -591,7 +586,7 @@ impl<'ctx> CodeGen<'ctx> {
 
                     let val = program
                         .get(&Location(x as usize, y as usize))
-                        .unwrap_or(b' '.into());
+                        .unwrap_or_else(|| b' '.into());
                     unsafe { put_int(val) };
                 }
                 b'&' => {
@@ -606,8 +601,8 @@ impl<'ctx> CodeGen<'ctx> {
                     let input = io::stdin()
                         .bytes()
                         .next()
-                        .and_then(|result| result.ok())
-                        .map(|byte| byte as u64)
+                        .and_then(std::result::Result::ok)
+                        .map(u64::from)
                         .expect("Input not a character");
                     unsafe { put_int(input) };
                 }
@@ -712,8 +707,8 @@ impl<'ctx> CodeGen<'ctx> {
                     break;
                 }
 
-                // input
-                b'&' | b'~' => {
+                // input or halt
+                b'@' | b'&' | b'~' => {
                     self.return_zero();
                     break;
                 }
@@ -721,12 +716,6 @@ impl<'ctx> CodeGen<'ctx> {
                 // output
                 b'.' => self.printf_int(self.pop_stack()),
                 b',' => self.printf_char(self.pop_stack()),
-
-                // halt
-                b'@' => {
-                    self.return_zero();
-                    break;
-                }
 
                 // noop
                 b' ' => (),
@@ -744,7 +733,6 @@ impl<'ctx> CodeGen<'ctx> {
                 module.print_to_string().to_string()
             );
         }
-        panic!();
 
         //println!("{:?}", program);
 
