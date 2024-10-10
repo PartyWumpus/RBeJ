@@ -16,16 +16,16 @@ mod program;
 
 use crate::program::{Direction, Location, Program};
 use std::error::Error;
-use std::io;
-use std::io::Read;
+use std::io::{self, Read};
 
 // TODO:
 // pop zero from stack when empty (and don't decrement stack counter)
 // catch stack overflow in llvm IR, and return if so?
+//  and stack underflow
 // read from file
 // figure out a good debug info system
 
-const STACK_SIZE: usize = 256;
+const STACK_SIZE: usize = 50;
 const PRINT_LLVM_IR: bool = false;
 
 #[repr(C)]
@@ -101,7 +101,7 @@ struct CodeGen<'ctx> {
 
 /// PRELUDE
 impl<'ctx> CodeGen<'ctx> {
-    fn prelude(&self) -> Result<(), Box<dyn Error>> {
+    fn build_prelude(&self) -> Result<(), Box<dyn Error>> {
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let stack_type = i64_type.vec_type(STACK_SIZE as u32);
@@ -109,12 +109,12 @@ impl<'ctx> CodeGen<'ctx> {
             .context
             .struct_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
 
-        let zero = i64_type.const_int(0, false);
+        let minus_one = i64_type.const_int(u64::MAX, false);
         let stack_zero = stack_type.const_zero();
         let status_zero = status_type.const_zero();
 
         let stack_counter = self.module.add_global(i64_type, None, "stack_counter");
-        stack_counter.set_initializer(&zero);
+        stack_counter.set_initializer(&minus_one);
 
         let stack = self.module.add_global(stack_type, None, "stack");
         stack.set_initializer(&stack_zero);
@@ -181,7 +181,7 @@ impl<'ctx> CodeGen<'ctx> {
             .get_nth_param(0)
             .expect("put_int has one arg")
             .into_int_value();
-        self.push_stack(val)?;
+        self.build_push_stack(val)?;
         self.builder.build_return(None)?;
         Ok(())
     }
@@ -189,7 +189,7 @@ impl<'ctx> CodeGen<'ctx> {
 
 /// GENERAL UTILITY
 impl<'ctx> CodeGen<'ctx> {
-    fn printf_int(&self, int: IntValue) -> Result<(), Box<dyn Error>> {
+    fn build_printf_int(&self, int: IntValue) -> Result<(), Box<dyn Error>> {
         let printf = self
             .module
             .get_function("printf_int")
@@ -200,7 +200,7 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn printf_char(&self, int: IntValue) -> Result<(), Box<dyn Error>> {
+    fn build_printf_char(&self, int: IntValue) -> Result<(), Box<dyn Error>> {
         let printf = self
             .module
             .get_function("printf_char")
@@ -220,32 +220,32 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    fn get_stack_counter_ptr(&self) -> PointerValue<'_> {
+    fn stack_counter_ptr(&self) -> PointerValue<'_> {
         self.module
             .get_global("stack_counter")
             .expect("stack_counter exists globally")
             .as_pointer_value()
     }
 
-    fn get_stack_ptr(&self) -> PointerValue<'_> {
+    fn stack_ptr(&self) -> PointerValue<'_> {
         self.module
             .get_global("stack")
             .expect("stack exists globally")
             .as_pointer_value()
     }
 
-    fn get_status_ptr(&self) -> PointerValue<'_> {
+    fn status_ptr(&self) -> PointerValue<'_> {
         self.module
             .get_global("status")
             .expect("status exists globally")
             .as_pointer_value()
     }
 
-    fn increment_stack_counter(&self) -> Result<(), Box<dyn Error>> {
+    fn build_increment_stack_counter(&self) -> Result<(), Box<dyn Error>> {
         let i64_type = self.context.i64_type();
         let one = i64_type.const_int(1, false);
 
-        let ptr = self.get_stack_counter_ptr();
+        let ptr = self.stack_counter_ptr();
 
         let stack_counter = self
             .builder
@@ -258,11 +258,11 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn decrement_stack_counter(&self) -> Result<(), Box<dyn Error>> {
+    fn build_decrement_stack_counter(&self) -> Result<(), Box<dyn Error>> {
         let i64_type = self.context.i64_type();
         let minus_one = i64_type.const_int(u64::MAX, false); // ;)
 
-        let ptr = self.get_stack_counter_ptr();
+        let ptr = self.stack_counter_ptr();
 
         let stack_counter = self
             .builder
@@ -277,13 +277,14 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn peek_ptr(&self) -> Result<PointerValue<'_>, Box<dyn Error>> {
+    /** Returns a pointer to the current top of the stack */
+    fn build_peek_stack_ptr(&self) -> Result<PointerValue<'_>, Box<dyn Error>> {
         let i64_type = self.context.i64_type();
         let stack_type = i64_type.vec_type(STACK_SIZE as u32);
         let zero = i64_type.const_zero();
 
-        let stack_ptr = self.get_stack_ptr();
-        let counter_ptr = self.get_stack_counter_ptr();
+        let stack_ptr = self.stack_ptr();
+        let counter_ptr = self.stack_counter_ptr();
         let counter = self
             .builder
             .build_load(i64_type, counter_ptr, "count")?
@@ -296,9 +297,9 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    fn peek_stack(&self) -> Result<IntValue<'_>, Box<dyn Error>> {
+    fn build_peek_stack(&self) -> Result<IntValue<'_>, Box<dyn Error>> {
         let i64_type = self.context.i64_type();
-        let ptr = self.peek_ptr()?;
+        let ptr = self.build_peek_stack_ptr()?;
 
         let res = self
             .builder
@@ -308,16 +309,18 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(res)
     }
 
-    fn pop_stack(&self) -> Result<IntValue<'_>, Box<dyn Error>> {
-        let res = self.peek_stack()?;
-        self.decrement_stack_counter()?;
+    fn build_pop_stack(&self) -> Result<IntValue<'_>, Box<dyn Error>> {
+        // FIXME: if counter < 0, crash?
+        let res = self.build_peek_stack()?;
+        self.build_decrement_stack_counter()?;
 
         Ok(res)
     }
 
-    fn push_stack(&self, val: IntValue<'_>) -> Result<(), Box<dyn Error>> {
-        self.increment_stack_counter()?;
-        let ptr = self.peek_ptr()?;
+    fn build_push_stack(&self, val: IntValue<'_>) -> Result<(), Box<dyn Error>> {
+        // FIXME: if counter > STACK_SIZE, crash?
+        self.build_increment_stack_counter()?;
+        let ptr = self.build_peek_stack_ptr()?;
 
         self.builder.build_store(ptr, val)?;
         Ok(())
@@ -326,65 +329,65 @@ impl<'ctx> CodeGen<'ctx> {
 
 /// OPERATIONS
 impl<'ctx> CodeGen<'ctx> {
-    // numbers
+    /// numbers
 
-    fn push_static_number(&self, int: u64) -> Result<(), Box<dyn Error>> {
+    fn build_push_static_number(&self, int: u64) -> Result<(), Box<dyn Error>> {
         let i64_type = self.context.i64_type();
         let int = i64_type.const_int(int, false);
 
-        self.push_stack(int)?;
+        self.build_push_stack(int)?;
         Ok(())
     }
 
-    // normal operations
+    /// normal operations
 
-    fn addition(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_addition(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
 
         let res = self.builder.build_int_add(a, b, "add")?;
-        self.push_stack(res)?;
+        self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn subtraction(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_subtraction(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
 
         let res = self.builder.build_int_sub(b, a, "sub")?;
-        self.push_stack(res)?;
+        self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn multiplication(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_multiplication(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
         let res = self.builder.build_int_mul(b, a, "mult")?;
-        self.push_stack(res)?;
+        self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn division(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_division(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
         let res = self.builder.build_int_signed_div(b, a, "div")?;
-        self.push_stack(res)?;
+        self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn modulo(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_modulo(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
         // FIXME: check what to do on negative/zero b!!
         let res = self.builder.build_int_signed_rem(b, a, "modulo")?;
-        self.push_stack(res)?;
+        self.build_push_stack(res)?;
         Ok(())
     }
 
     // if zero, set to 1, else set to zero
-    fn not(&self, func: FunctionValue) -> Result<(), Box<dyn Error>> {
+    fn build_not(&self, func: FunctionValue) -> Result<(), Box<dyn Error>> {
         let zero = self.context.i64_type().const_zero();
-        let a = self.pop_stack()?;
+        let a = self.build_pop_stack()?;
 
         let cond = self
             .builder
@@ -400,20 +403,20 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap();
 
         self.builder.position_at_end(zero_block);
-        self.push_static_number(1)?;
+        self.build_push_static_number(1)?;
         self.builder.build_unconditional_branch(cont_block).unwrap();
 
         self.builder.position_at_end(not_zero_block);
-        self.push_static_number(0)?;
+        self.build_push_static_number(0)?;
         self.builder.build_unconditional_branch(cont_block).unwrap();
 
         self.builder.position_at_end(cont_block);
         Ok(())
     }
 
-    fn greater_than(&self, func: FunctionValue) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
+    fn build_greater_than(&self, func: FunctionValue) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
 
         let cond = self
             .builder
@@ -427,40 +430,40 @@ impl<'ctx> CodeGen<'ctx> {
             .build_conditional_branch(cond, greater_block, not_greater_block)?;
 
         self.builder.position_at_end(greater_block);
-        self.push_static_number(1)?;
+        self.build_push_static_number(1)?;
         self.builder.build_unconditional_branch(cont_block)?;
 
         self.builder.position_at_end(not_greater_block);
-        self.push_static_number(0)?;
+        self.build_push_static_number(0)?;
         self.builder.build_unconditional_branch(cont_block)?;
 
         self.builder.position_at_end(cont_block);
         Ok(())
     }
 
-    fn duplicate(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.peek_stack()?;
-        self.push_stack(a)?;
+    fn build_duplicate(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_peek_stack()?;
+        self.build_push_stack(a)?;
         Ok(())
     }
 
-    fn swap(&self) -> Result<(), Box<dyn Error>> {
-        let a = self.pop_stack()?;
-        let b = self.pop_stack()?;
-        self.push_stack(a)?;
-        self.push_stack(b)?;
+    fn build_swap(&self) -> Result<(), Box<dyn Error>> {
+        let a = self.build_pop_stack()?;
+        let b = self.build_pop_stack()?;
+        self.build_push_stack(a)?;
+        self.build_push_stack(b)?;
         Ok(())
     }
 
-    fn pop_and_discard(&self) -> Result<(), Box<dyn Error>> {
-        self.pop_stack()?;
+    fn build_pop_and_discard(&self) -> Result<(), Box<dyn Error>> {
+        self.build_pop_stack()?;
         Ok(())
     }
 
-    // return
+    /// return
 
-    fn return_data(&self, vals: &[IntValue; 3]) -> Result<(), Box<dyn Error>> {
-        let ptr = self.get_status_ptr();
+    fn build_return_data(&self, vals: &[IntValue; 3]) -> Result<(), Box<dyn Error>> {
+        let ptr = self.status_ptr();
         let i64_type = self.context.i64_type();
         let status_type = self
             .context
@@ -477,37 +480,55 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn return_pop_three(&self) -> Result<(), Box<dyn Error>> {
-        let y = self.pop_stack()?;
-        let x = self.pop_stack()?;
-        let value = self.pop_stack()?;
+    fn build_return_pop_three(&self) -> Result<(), Box<dyn Error>> {
+        let y = self.build_pop_stack()?;
+        let x = self.build_pop_stack()?;
+        let value = self.build_pop_stack()?;
 
-        self.return_data(&[x, y, value])?;
+        self.build_return_data(&[x, y, value])?;
         Ok(())
     }
 
-    fn return_pop_two(&self) -> Result<(), Box<dyn Error>> {
+    fn build_return_pop_two(&self) -> Result<(), Box<dyn Error>> {
         let zero = self.context.i64_type().const_zero();
 
-        let y = self.pop_stack()?;
-        let x = self.pop_stack()?;
+        let y = self.build_pop_stack()?;
+        let x = self.build_pop_stack()?;
 
-        self.return_data(&[x, y, zero])?;
+        self.build_return_data(&[x, y, zero])?;
         Ok(())
     }
 
-    fn return_pop_one(&self) -> Result<(), Box<dyn Error>> {
+    fn build_return_pop_one(&self) -> Result<(), Box<dyn Error>> {
         let zero = self.context.i64_type().const_zero();
 
-        let x = self.pop_stack()?;
+        let x = self.build_pop_stack()?;
 
-        self.return_data(&[x, zero, zero])?;
+        self.build_return_data(&[x, zero, zero])?;
         Ok(())
     }
 
-    fn return_zero(&self) -> Result<(), Box<dyn Error>> {
+    fn build_return_zero(&self) -> Result<(), Box<dyn Error>> {
         let zero = self.context.i64_type().const_zero();
-        self.return_data(&[zero, zero, zero])?;
+        self.build_return_data(&[zero, zero, zero])?;
+        Ok(())
+    }
+
+    fn build_return_stack_pointer(&self) -> Result<(), Box<dyn Error>> {
+        let i64_type = self.context.i64_type();
+        let zero = i64_type.const_zero();
+
+        let ptr = self.stack_ptr();
+        let start_ptr = self
+            .builder
+            .build_ptr_to_int(ptr, i64_type, "stack_pointer")?;
+
+        let ptr = self.build_peek_stack_ptr()?;
+        let end_ptr = self
+            .builder
+            .build_ptr_to_int(ptr, i64_type, "stack_counter_pointer")?;
+
+        self.build_return_data(&[start_ptr, end_ptr, zero])?;
         Ok(())
     }
 }
@@ -518,13 +539,10 @@ impl<'ctx> CodeGen<'ctx> {
         &self,
         mut program: Program,
         init_state: Option<BefungeState>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<Vec<u64>, Box<dyn Error>> {
         let put_int = self.get_put_int_fn_ptr();
 
-        let mut cache_ratio = (0, 0); // FOR DEBUGGING
-
         let mut state = init_state.unwrap_or_else(BefungeState::new);
-        //let mut cache: HashMap<BefungeState, FunctionEffects> = HashMap::default();
         let mut cache: Cache = Cache::new(&program);
         let mut visited: HashMap<Location, HashSet<BefungeState>> = HashMap::default();
         loop {
@@ -534,7 +552,6 @@ impl<'ctx> CodeGen<'ctx> {
                 func = cached_state.func;
                 last_char = cached_state.last_char;
                 state = cached_state.state_after;
-                cache_ratio.0 += 1;
             } else {
                 //println!("generating uncached function");
                 let start_state = state;
@@ -549,14 +566,26 @@ impl<'ctx> CodeGen<'ctx> {
                         state_after: state,
                     },
                 );
-                cache_ratio.1 += 1;
             }
-            //println!("{} cached vs {} uncached", cache_count.0, cache_count.1);
+
             let status = unsafe { *func() };
-            //println!("status: {status:?}, char: '{}'", last_char as char);
+
             match last_char {
                 b'@' => {
-                    return Ok(());
+                    let stack_start = status.0 as *const u64;
+                    let stack_end = status.1 as *const u64;
+
+                    let stack = get_stack_data(stack_start, stack_end);
+
+                    return Ok(stack);
+                }
+                b'q' => {
+                    let stack_start = status.0 as *const u64;
+                    let stack_end = status.1 as *const u64;
+
+                    let stack = get_stack_data(stack_start, stack_end);
+
+                    println!("stack: {stack:?}");
                 }
                 b'?' => {
                     state.direction = rand::random();
@@ -578,9 +607,7 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 }
                 b'p' => {
-                    let y = status.0;
-                    let x = status.1;
-                    let value = status.2;
+                    let BefungeReturn(y, x, value) = status;
 
                     let loc = Location(x as usize, y as usize);
                     let success = program.set_if_valid(&loc, value);
@@ -593,8 +620,7 @@ impl<'ctx> CodeGen<'ctx> {
                     };
                 }
                 b'g' => {
-                    let y = status.0;
-                    let x = status.1;
+                    let BefungeReturn(y, x, _) = status;
 
                     let val = program
                         .get(&Location(x as usize, y as usize))
@@ -676,23 +702,23 @@ impl<'ctx> CodeGen<'ctx> {
                         if char == b'"'.into() {
                             break;
                         }
-                        self.push_static_number(char)?;
+                        self.build_push_static_number(char)?;
                     }
                 }
 
-                b'0'..=b'9' => self.push_static_number((char - b'0').into())?,
+                b'0'..=b'9' => self.build_push_static_number((char - b'0').into())?,
 
                 // normal operations
-                b'+' => self.addition()?,
-                b'-' => self.subtraction()?,
-                b'*' => self.multiplication()?,
-                b'/' => self.division()?,
-                b'%' => self.modulo()?,
-                b'!' => self.not(function)?,
-                b'`' => self.greater_than(function)?,
-                b':' => self.duplicate()?,
-                b'\\' => self.swap()?,
-                b'$' => self.pop_and_discard()?,
+                b'+' => self.build_addition()?,
+                b'-' => self.build_subtraction()?,
+                b'*' => self.build_multiplication()?,
+                b'/' => self.build_division()?,
+                b'%' => self.build_modulo()?,
+                b'!' => self.build_not(function)?,
+                b'`' => self.build_greater_than(function)?,
+                b':' => self.build_duplicate()?,
+                b'\\' => self.build_swap()?,
+                b'$' => self.build_pop_and_discard()?,
 
                 // static moves (don't worry about these JIT)
                 b'>' => state.direction = Direction::East,
@@ -705,31 +731,37 @@ impl<'ctx> CodeGen<'ctx> {
                 // logic for where to go is handled later because the JIT
                 // doesn't know about runtime state
                 b'?' | b'_' | b'|' => {
-                    self.return_pop_one()?;
+                    self.build_return_pop_one()?;
                     break;
                 }
 
                 // put (this is the big one!)
                 b'p' => {
-                    self.return_pop_three()?;
+                    self.build_return_pop_three()?;
                     break;
                 }
 
                 // get
                 b'g' => {
-                    self.return_pop_two()?;
+                    self.build_return_pop_two()?;
                     break;
                 }
 
-                // input or halt
-                b'@' | b'&' | b'~' => {
-                    self.return_zero()?;
+                // input
+                b'&' | b'~' => {
+                    self.build_return_zero()?;
+                    break;
+                }
+
+                // halt and debug operator
+                b'@' | b'q' => {
+                    self.build_return_stack_pointer()?;
                     break;
                 }
 
                 // output
-                b'.' => self.printf_int(self.pop_stack()?)?,
-                b',' => self.printf_char(self.pop_stack()?)?,
+                b'.' => self.build_printf_int(self.build_pop_stack()?)?,
+                b',' => self.build_printf_char(self.build_pop_stack()?)?,
 
                 // noop
                 b' ' => (),
@@ -760,6 +792,18 @@ impl<'ctx> CodeGen<'ctx> {
     }
 }
 
+fn get_stack_data(start: *const u64, end: *const u64) -> Vec<u64> {
+    // FIXME: "as usize" is unsafe here
+    // if offset is negative, freak the fuck out
+    let length = unsafe { end.offset_from(start) } as usize;
+    //println!("{start:?} to {end:?}, size: {length}");
+    let mut res = Vec::with_capacity(length);
+    for i in 0..length {
+        res.push(unsafe { *start.wrapping_add(i) });
+    }
+    res
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let context = Context::create();
     let module = context.create_module("befunge");
@@ -771,7 +815,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         builder: context.create_builder(),
         execution_engine,
     };
-    codegen.prelude()?;
+    codegen.build_prelude()?;
     if PRINT_LLVM_IR {
         println!(
             "-- LLVM IR PRELUDE begin: \n{}-- LLVM IR PRELUDE end:\n",
@@ -816,9 +860,9 @@ $>-66+0p077+0p1^ vp+2g0+67+2g0+56 < pp0+67:0+560<|#<
 v       vg00p00<
 9    >:.>:.1-: |
 9    *         .
-9    *         @
-9    *
-9    *
+9    *         5
+9    *         5
+9    * @789,,:+<
 >99**^     "##
         .chars()
         .skip(1)
@@ -847,11 +891,12 @@ v     works for    0 < n < 1,373,653
 "##.chars().skip(1).collect::<String>();
     let quine = r##">:# 0# g# ,# 1# +# 0#_ #! _0#1 "this crap writes itself!" #0 #_ #! _#0 :# 3# 5# *# 7# *# #?# %# _@"##;
     let wasd = r##">~:,1-,@"##;
-    //let program = Program::new(&countdown);
-    let program = Program::new(&primes);
+    let program = Program::new(&countdown);
+    //let program = Program::new(&primes);
     //let program = Program::new(&wasd);
 
-    codegen.jit_befunge(program, None)?;
+    let x = codegen.jit_befunge(program, None)?;
+    println!("final state: {x:?}");
 
     Ok(())
 }
