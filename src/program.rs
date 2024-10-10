@@ -97,36 +97,41 @@ impl Program {
             true
         }
     }
+}
 
-    pub const fn step_with_wrap(&self, dir: Direction, loc: Location) -> Location {
-        match dir {
-            Direction::North => {
-                if loc.1 == 0 {
-                    Location(loc.0, self.height - 1)
-                } else {
-                    Location(loc.0, loc.1 - 1)
-                }
+pub const fn step_with_wrap(
+    width: usize,
+    height: usize,
+    dir: Direction,
+    loc: Location,
+) -> Location {
+    match dir {
+        Direction::North => {
+            if loc.1 == 0 {
+                Location(loc.0, height - 1)
+            } else {
+                Location(loc.0, loc.1 - 1)
             }
-            Direction::South => {
-                if loc.1 >= self.height {
-                    Location(loc.0, 0)
-                } else {
-                    Location(loc.0, loc.1 + 1)
-                }
+        }
+        Direction::South => {
+            if loc.1 >= height {
+                Location(loc.0, 0)
+            } else {
+                Location(loc.0, loc.1 + 1)
             }
-            Direction::East => {
-                if loc.0 >= self.width {
-                    Location(0, loc.1)
-                } else {
-                    Location(loc.0 + 1, loc.1)
-                }
+        }
+        Direction::East => {
+            if loc.0 >= width {
+                Location(0, loc.1)
+            } else {
+                Location(loc.0 + 1, loc.1)
             }
-            Direction::West => {
-                if loc.0 == 0 {
-                    Location(self.width - 1, loc.1)
-                } else {
-                    Location(loc.0 - 1, loc.1)
-                }
+        }
+        Direction::West => {
+            if loc.0 == 0 {
+                Location(width - 1, loc.1)
+            } else {
+                Location(loc.0 - 1, loc.1)
             }
         }
     }

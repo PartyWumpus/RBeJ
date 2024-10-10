@@ -30,6 +30,7 @@ dependencies = [
  "rand",
  "rand_derive2",
  "rustc-hash",
+ "thiserror",
 ]
 
 [[package]]
