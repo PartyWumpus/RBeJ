@@ -71,7 +71,7 @@ struct Cache {
 impl Cache {
     fn new(program: &Program) -> Self {
         let mut x = Vec::new();
-        x.resize_with(program.width * (program.height + 1) * 4, || None);
+        x.resize_with((program.width + 1) * (program.height + 1) * 4, || None);
         Self { data: x }
     }
 
