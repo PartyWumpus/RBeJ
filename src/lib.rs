@@ -3,38 +3,39 @@ use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
+use inkwell::support::LLVMString;
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
-use program::step_with_wrap;
 use rand::distributions::{Alphanumeric, DistString};
 
-//use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-//use gxhash::{HashMap, HashSet};
-//use std::collections::{HashMap, HashSet};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 mod program;
+use program::step_with_wrap;
 
-use crate::program::{Direction, Location, Program};
+pub use crate::program::{Direction, Location, Program};
+use core::slice;
 use std::io::{self, Read};
 
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-enum BefungeError {
+pub enum BefungeError {
+    #[error("The JIT compiler failed to initialize")]
+    JitInitializeFailure(LLVMString),
     #[error("An error occured while trying to convert the befunge to llvm IR")]
     InkwellCompileError(#[from] BuilderError),
-    #[error("The execution reached an invalid instruction")]
-    InvalidInstruction,
+    #[error("The execution reached an invalid instruction: {0}")]
+    InvalidInstruction(u64),
 }
 
 // TODO:
 // pop zero from stack when empty (and don't decrement stack counter)
 // catch stack overflow in llvm IR, and return if so?
-//  and stack underflow
 // read from file
 // cleanup function pointers n stuff currently they dangle i think
 // figure out a good debug info system
+// add a proper CLI interface or smth
 
 const STACK_SIZE: usize = 50;
 const PRINT_LLVM_IR: bool = false;
@@ -44,71 +45,95 @@ const PRINT_LLVM_IR: bool = false;
 struct BefungeReturn(u64, u64, u64);
 
 type BefungeFunc = unsafe extern "C" fn() -> *const BefungeReturn;
-type BefungePutFunc = unsafe extern "C" fn(u64) -> ();
+type PutIntFunc = unsafe extern "C" fn(u64) -> ();
 
-struct FunctionEffects {
+struct CachedFunction {
     last_char: u8,
     func: BefungeFunc,
-    state_after: BefungeState,
+    pos_after: BefungePosition,
 }
 
+/// Current location and direction of execution
+/// Used as keys for getting cached compiled functions
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-struct BefungeState {
-    location: Location,
-    direction: Direction,
+pub struct BefungePosition {
+    pub location: Location,
+    pub direction: Direction,
 }
 
-impl BefungeState {
-    const fn get_index(&self, program: &Program) -> usize {
-        self.direction as usize + program.calc_index(&self.location) * 4
-    }
-}
-
-struct Cache {
-    data: Vec<Option<FunctionEffects>>,
-}
-
-impl Cache {
-    fn new(program: &Program) -> Self {
-        let mut x = Vec::new();
-        x.resize_with((program.width + 1) * (program.height + 1) * 4, || None);
-        Self { data: x }
-    }
-
-    fn get(&self, program: &Program, key: &BefungeState) -> Option<&FunctionEffects> {
-        let index = key.get_index(program);
-        let x = self.data.get(index);
-        x.and_then(std::convert::Into::into)
-    }
-
-    fn set(&mut self, program: &Program, key: BefungeState, val: FunctionEffects) {
-        self.data[key.get_index(program)] = Some(val);
-    }
-
-    fn delete(&mut self, program: &Program, key: &BefungeState) {
-        self.data[key.get_index(program)] = None;
-    }
-}
-
-impl BefungeState {
-    const fn new() -> Self {
+impl Default for BefungePosition {
+    fn default() -> Self {
         Self {
             location: Location(0, 0),
             direction: Direction::East,
         }
     }
+}
 
-    fn step(&mut self, program: &Program) {
-        self.location =
-            step_with_wrap(program.width, program.height, self.direction, self.location);
+impl BefungePosition {
+    const fn get_index(&self, width: usize) -> usize {
+        self.direction as usize + Program::calc_index(&self.location, width) * 4
+    }
+}
+
+struct FunctionCache {
+    data: Vec<Option<CachedFunction>>,
+    width: usize,
+}
+
+impl FunctionCache {
+    fn new(width: usize, height: usize) -> Self {
+        let mut x = Vec::new();
+        x.resize_with((width + 1) * (height + 1) * 4, || None);
+        Self { data: x, width }
+    }
+
+    fn get(&self, key: &BefungePosition) -> Option<&CachedFunction> {
+        let index = key.get_index(self.width);
+        let x = self.data.get(index);
+        x.and_then(std::convert::Into::into)
+    }
+
+    fn set(&mut self, key: BefungePosition, val: CachedFunction) {
+        self.data[key.get_index(self.width)] = Some(val);
+    }
+
+    fn delete(&mut self, key: &BefungePosition) {
+        self.data[key.get_index(self.width)] = None;
     }
 }
 
 struct CodeGen<'ctx> {
     context: &'ctx Context,
-    module: Module<'ctx>,
+    base_module: Module<'ctx>,
     builder: Builder<'ctx>,
     execution_engine: ExecutionEngine<'ctx>,
+}
+
+impl<'ctx> CodeGen<'ctx> {
+    fn new(context: &'ctx Context, opt_level: OptimizationLevel) -> Result<Self, BefungeError> {
+        let base_module = context.create_module("befunge");
+        let execution_engine = base_module
+            .create_jit_execution_engine(opt_level)
+            .map_err(|err| BefungeError::JitInitializeFailure(err))?;
+
+        let codegen = CodeGen {
+            builder: context.create_builder(),
+            context,
+            base_module,
+            execution_engine,
+        };
+        codegen.build_prelude()?;
+
+        if PRINT_LLVM_IR {
+            println!(
+                "-- LLVM IR PRELUDE begin: \n{}-- LLVM IR PRELUDE end:\n",
+                codegen.base_module.print_to_string().to_string()
+            );
+        }
+
+        Ok(codegen)
+    }
 }
 
 /// PRELUDE
@@ -125,17 +150,17 @@ impl<'ctx> CodeGen<'ctx> {
         let stack_zero = stack_type.const_zero();
         let status_zero = status_type.const_zero();
 
-        let stack_counter = self.module.add_global(i64_type, None, "stack_counter");
+        let stack_counter = self.base_module.add_global(i64_type, None, "stack_counter");
         stack_counter.set_initializer(&minus_one);
 
-        let stack = self.module.add_global(stack_type, None, "stack");
+        let stack = self.base_module.add_global(stack_type, None, "stack");
         stack.set_initializer(&stack_zero);
 
-        let status = self.module.add_global(status_type, None, "status");
+        let status = self.base_module.add_global(status_type, None, "status");
         status.set_initializer(&status_zero);
 
         let printf_type = self.context.i32_type().fn_type(&[ptr_type.into()], true);
-        let printf = self.module.add_function("printf", printf_type, None);
+        let printf = self.base_module.add_function("printf", printf_type, None);
 
         self.prelude_build_printf_int(printf)?;
         self.prelude_build_printf_char(printf)?;
@@ -146,7 +171,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn prelude_build_printf_int(&self, printf: FunctionValue) -> Result<(), BefungeError> {
         let i64_type = self.context.i64_type();
         let func_type = self.context.void_type().fn_type(&[i64_type.into()], false);
-        let function = self.module.add_function("printf_int", func_type, None);
+        let function = self.base_module.add_function("printf_int", func_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
         let str = unsafe {
@@ -167,7 +192,9 @@ impl<'ctx> CodeGen<'ctx> {
     fn prelude_build_printf_char(&self, printf: FunctionValue) -> Result<(), BefungeError> {
         let i64_type = self.context.i64_type();
         let func_type = self.context.void_type().fn_type(&[i64_type.into()], false);
-        let function = self.module.add_function("printf_char", func_type, None);
+        let function = self
+            .base_module
+            .add_function("printf_char", func_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
         let str = unsafe {
@@ -189,7 +216,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn prelude_build_put_int(&self) -> Result<(), BefungeError> {
         let i64_type = self.context.i64_type();
         let func_type = self.context.void_type().fn_type(&[i64_type.into()], false);
-        let function = self.module.add_function("put_int", func_type, None);
+        let function = self.base_module.add_function("put_int", func_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
         let val = function
@@ -206,7 +233,7 @@ impl<'ctx> CodeGen<'ctx> {
 impl<'ctx> CodeGen<'ctx> {
     fn build_printf_int(&self, int: IntValue) -> Result<(), BefungeError> {
         let printf = self
-            .module
+            .base_module
             .get_function("printf_int")
             .expect("printf_int exists globally");
 
@@ -217,7 +244,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn build_printf_char(&self, int: IntValue) -> Result<(), BefungeError> {
         let printf = self
-            .module
+            .base_module
             .get_function("printf_char")
             .expect("printf_char exists globally");
 
@@ -226,7 +253,7 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn get_put_int_fn_ptr(&self) -> BefungePutFunc {
+    fn get_put_int_fn_ptr(&self) -> PutIntFunc {
         unsafe {
             self.execution_engine
                 .get_function("put_int")
@@ -236,21 +263,21 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn stack_counter_ptr(&self) -> PointerValue<'_> {
-        self.module
+        self.base_module
             .get_global("stack_counter")
             .expect("stack_counter exists globally")
             .as_pointer_value()
     }
 
     fn stack_ptr(&self) -> PointerValue<'_> {
-        self.module
+        self.base_module
             .get_global("stack")
             .expect("stack exists globally")
             .as_pointer_value()
     }
 
     fn status_ptr(&self) -> PointerValue<'_> {
-        self.module
+        self.base_module
             .get_global("status")
             .expect("status exists globally")
             .as_pointer_value()
@@ -287,7 +314,6 @@ impl<'ctx> CodeGen<'ctx> {
         let stack_counter = self
             .builder
             .build_int_add(stack_counter, minus_one, "count")?;
-
         self.builder.build_store(ptr, stack_counter)?;
         Ok(())
     }
@@ -324,8 +350,28 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(res)
     }
 
+    //TODO: If the stack counter is currently zero, we return zero instead of popping
     fn build_pop_stack(&self) -> Result<IntValue<'_>, BefungeError> {
-        // FIXME: if counter < 0, crash?
+        //let i64_type = self.context.i64_type();
+
+        //let ptr = self.stack_counter_ptr();
+
+        //let stack_counter = self
+        //    .builder
+        //    .build_load(i64_type, ptr, "count")?
+        //    .into_int_value();
+
+        //let cond = self.builder.build_int_compare(
+        //    inkwell::IntPredicate::SLT,
+        //    stack_counter,
+        //    i64_type.const_zero(),
+        //    "iszero",
+        //);
+
+        //let zero_block = self.context.append_basic_block(func, "zero");
+        //let normal_block = self.context.append_basic_block(func, "nonzero");
+        //let cont_block = self.context.append_basic_block(func, "cont");
+
         let res = self.build_peek_stack()?;
         self.build_decrement_stack_counter()?;
 
@@ -546,136 +592,162 @@ impl<'ctx> CodeGen<'ctx> {
     }
 }
 
+pub struct JitCompiler<'ctx> {
+    codegen: CodeGen<'ctx>,
+    pub position: BefungePosition,
+    function_cache: FunctionCache,
+    visited: HashMap<Location, HashSet<BefungePosition>>,
+    pub program: Program,
+    put_int_func: PutIntFunc,
+}
+
 /// JIT TIME
-impl<'ctx> CodeGen<'ctx> {
-    fn jit_befunge(
-        &self,
-        mut program: Program,
-        init_state: Option<BefungeState>,
-    ) -> Result<Vec<u64>, BefungeError> {
-        let put_int = self.get_put_int_fn_ptr();
+impl<'ctx> JitCompiler<'ctx> {
+    fn step_position(&mut self) {
+        self.position.location = step_with_wrap(
+            self.program.width,
+            self.program.height,
+            self.position.direction,
+            self.position.location,
+        )
+    }
 
-        let mut state = init_state.unwrap_or_else(BefungeState::new);
-        let mut cache: Cache = Cache::new(&program);
-        let mut visited: HashMap<Location, HashSet<BefungeState>> = HashMap::default();
+    pub fn new(context: &'ctx Context, program: Program) -> Result<Self, BefungeError> {
+        let codegen = CodeGen::new(context, OptimizationLevel::Aggressive)?;
+        let put_int_func = codegen.get_put_int_fn_ptr();
+
+        Ok(Self {
+            codegen,
+            visited: HashMap::new(),
+            position: BefungePosition::default(),
+            function_cache: FunctionCache::new(program.width, program.height),
+            program,
+            put_int_func,
+        })
+    }
+
+    pub fn jit_befunge_to_completion(&mut self) -> Result<(), BefungeError> {
         loop {
-            let func;
-            let last_char;
-            if let Some(cached_state) = cache.get(&program, &state) {
-                func = cached_state.func;
-                last_char = cached_state.last_char;
-                state = cached_state.state_after;
-            } else {
-                //println!("generating uncached function");
-                let start_state = state;
-                (func, state, last_char) =
-                    self.jit_one_expression(&program, state, &mut visited)?;
-                cache.set(
-                    &program,
-                    start_state,
-                    FunctionEffects {
-                        last_char,
-                        func,
-                        state_after: state,
-                    },
-                );
+            let finished = self.execute_some()?;
+            if finished {
+                return Ok(());
             }
-
-            let status = unsafe { *func() };
-
-            match last_char {
-                b'@' => {
-                    let stack_start = status.0 as *const u64;
-                    let stack_end = status.1 as *const u64;
-
-                    let stack = get_stack_data(stack_start, stack_end);
-
-                    return Ok(stack);
-                }
-                b'q' => {
-                    let stack_start = status.0 as *const u64;
-                    let stack_end = status.1 as *const u64;
-
-                    let stack = get_stack_data(stack_start, stack_end);
-
-                    println!("stack: {stack:?}");
-                }
-                b'?' => {
-                    state.direction = rand::random();
-                }
-                b'_' => {
-                    let status = status.0;
-                    if status == 0 {
-                        state.direction = Direction::East;
-                    } else {
-                        state.direction = Direction::West;
-                    }
-                }
-                b'|' => {
-                    let status = status.0;
-                    if status == 0 {
-                        state.direction = Direction::South;
-                    } else {
-                        state.direction = Direction::North;
-                    }
-                }
-                b'p' => {
-                    let BefungeReturn(y, x, value) = status;
-
-                    let loc = Location(x as usize, y as usize);
-                    let success = program.set_if_valid(&loc, value);
-                    if success {
-                        if let Some(visitors) = visited.get(&loc) {
-                            for visitor in visitors {
-                                cache.delete(&program, visitor);
-                            }
-                        };
-                    };
-                }
-                b'g' => {
-                    let BefungeReturn(y, x, _) = status;
-
-                    let val = program
-                        .get(&Location(x as usize, y as usize))
-                        .unwrap_or_else(|| b' '.into());
-                    unsafe { put_int(val) };
-                }
-                b'&' => {
-                    let mut input_line = String::new();
-                    io::stdin()
-                        .read_line(&mut input_line)
-                        .expect("Failed to read line");
-                    let x: u64 = input_line.trim().parse().expect("Input not an integer");
-                    unsafe { put_int(x) };
-                }
-                b'~' => {
-                    let input = io::stdin()
-                        .bytes()
-                        .next()
-                        .and_then(std::result::Result::ok)
-                        .map(u64::from)
-                        .expect("Input not a character");
-                    unsafe { put_int(input) };
-                }
-                _ => unreachable!(),
-            }
-            state.step(&program);
         }
     }
 
-    fn jit_one_expression(
-        &self,
-        program: &Program,
-        initial_state: BefungeState,
-        visited: &mut HashMap<Location, HashSet<BefungeState>>,
-    ) -> Result<(BefungeFunc, BefungeState, u8), BefungeError> {
-        let mut state = initial_state;
+    /// Run through some amount of befunge code (until the next branch)
+    /// Returns true if execution has stopped (reached an @)
+    fn execute_some(&mut self) -> Result<bool, BefungeError> {
+        let func;
+        let last_char;
+        if let Some(cached_side_effects) = self.function_cache.get(&self.position) {
+            func = cached_side_effects.func;
+            last_char = cached_side_effects.last_char;
+            self.position = cached_side_effects.pos_after;
+        } else {
+            let start_pos = self.position.clone();
+            (func, last_char) = self.jit_expression()?;
+            self.function_cache.set(
+                start_pos,
+                CachedFunction {
+                    last_char,
+                    func,
+                    pos_after: self.position,
+                },
+            );
+        }
 
-        let module = self.context.create_module("befunger");
-        self.execution_engine
+        let status = unsafe { *func() };
+
+        match last_char {
+            b'@' => {
+                /*
+                let stack_start = status.0 as *const u64;
+                let stack_end = status.1 as *const u64;
+
+                let stack = read_stack_from_ptr(stack_start, stack_end);
+                */
+
+                return Ok(true);
+            }
+            b'q' => {
+                let stack_start = status.0 as *const u64;
+                let stack_end = status.1 as *const u64;
+
+                let stack = read_stack_from_ptr(stack_start, stack_end);
+
+                println!("stack: {stack:?}");
+            }
+            b'?' => {
+                self.position.direction = rand::random();
+            }
+            b'_' => {
+                let status = status.0;
+                if status == 0 {
+                    self.position.direction = Direction::East;
+                } else {
+                    self.position.direction = Direction::West;
+                }
+            }
+            b'|' => {
+                let status = status.0;
+                if status == 0 {
+                    self.position.direction = Direction::South;
+                } else {
+                    self.position.direction = Direction::North;
+                }
+            }
+            b'p' => {
+                let BefungeReturn(y, x, value) = status;
+
+                let loc = Location(x as usize, y as usize);
+                let success = self.program.set_if_valid(&loc, value);
+                if success {
+                    if let Some(visitors) = self.visited.get(&loc) {
+                        for visitor in visitors {
+                            self.function_cache.delete(visitor);
+                        }
+                    };
+                };
+            }
+            b'g' => {
+                let BefungeReturn(y, x, _) = status;
+
+                let val = self
+                    .program
+                    .get(&Location(x as usize, y as usize))
+                    .unwrap_or_else(|| b' '.into());
+                unsafe { (self.put_int_func)(val) };
+            }
+            b'&' => {
+                let mut input_line = String::new();
+                io::stdin()
+                    .read_line(&mut input_line)
+                    .expect("Failed to read line");
+                let x: u64 = input_line.trim().parse().expect("Input not an integer");
+                unsafe { (self.put_int_func)(x) };
+            }
+            b'~' => {
+                let input = io::stdin()
+                    .bytes()
+                    .next()
+                    .and_then(std::result::Result::ok)
+                    .map(u64::from)
+                    .expect("Input not a character");
+                unsafe { (self.put_int_func)(input) };
+            }
+            _ => unreachable!(),
+        }
+        self.step_position();
+        Ok(false)
+    }
+
+    fn jit_expression(&mut self) -> Result<(BefungeFunc, u8), BefungeError> {
+        let module = self.codegen.context.create_module("befunger");
+        self.codegen.execution_engine
             .add_module(&module)
             .expect("Adding a module to the execution engine should not fail as the module was just instanciated and so cannot already be in any execution engine");
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let ptr_type = self.codegen.context.ptr_type(AddressSpace::default());
 
         // see BefungeFunc
         let fn_type = ptr_type.fn_type(&[], true);
@@ -683,27 +755,28 @@ impl<'ctx> CodeGen<'ctx> {
         // FIXME: safety last, chance of name collision is lowTM ;)
         let func_name = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
         let function = module.add_function(&func_name, fn_type, None);
-        let basic_block = self.context.append_basic_block(function, "entry");
+        let basic_block = self.codegen.context.append_basic_block(function, "entry");
 
-        self.builder.position_at_end(basic_block);
+        self.codegen.builder.position_at_end(basic_block);
 
         let mut char: u8;
 
         loop {
-            let maybe_char = program.get_unchecked(&state.location).try_into();
-            char = match maybe_char {
-                Ok(char) => char,
-                Err(_) => return Err(BefungeError::InvalidInstruction),
-            };
-            //println!("op: {}, loc: {:?}", char as char, state.location);
-            match visited.get_mut(&state.location) {
+            let maybe_char = self.program.get_unchecked(&self.position.location);
+            // attempt to convert the u64 into a u8 char
+            char = maybe_char
+                .try_into()
+                .map_err(|_| BefungeError::InvalidInstruction(maybe_char))?;
+
+            //println!("op: {}, loc: {:?}", char as char, pos.location);
+            match self.visited.get_mut(&self.position.location) {
                 None => {
                     let mut visitors = HashSet::default();
-                    visitors.insert(initial_state);
-                    visited.insert(state.location, visitors);
+                    visitors.insert(self.position);
+                    self.visited.insert(self.position.location, visitors);
                 }
                 Some(visitors) => {
-                    visitors.insert(initial_state);
+                    visitors.insert(self.position);
                 }
             };
 
@@ -712,80 +785,86 @@ impl<'ctx> CodeGen<'ctx> {
                 b'"' => {
                     // read all characters directly onto stack until next "
                     loop {
-                        state.step(program);
-                        let char = program.get_unchecked(&state.location);
+                        self.step_position();
+                        let char = self.program.get_unchecked(&self.position.location);
                         if char == b'"'.into() {
                             break;
                         }
-                        self.build_push_static_number(char)?;
+                        self.codegen.build_push_static_number(char)?;
                     }
                 }
 
-                b'0'..=b'9' => self.build_push_static_number((char - b'0').into())?,
+                b'0'..=b'9' => self
+                    .codegen
+                    .build_push_static_number((char - b'0').into())?,
 
-                // normal operations
-                b'+' => self.build_addition()?,
-                b'-' => self.build_subtraction()?,
-                b'*' => self.build_multiplication()?,
-                b'/' => self.build_division()?,
-                b'%' => self.build_modulo()?,
-                b'!' => self.build_not(function)?,
-                b'`' => self.build_greater_than(function)?,
-                b':' => self.build_duplicate()?,
-                b'\\' => self.build_swap()?,
-                b'$' => self.build_pop_and_discard()?,
+                // -- normal operations
+                b'+' => self.codegen.build_addition()?,
+                b'-' => self.codegen.build_subtraction()?,
+                b'*' => self.codegen.build_multiplication()?,
+                b'/' => self.codegen.build_division()?,
+                b'%' => self.codegen.build_modulo()?,
+                b'!' => self.codegen.build_not(function)?,
+                b'`' => self.codegen.build_greater_than(function)?,
+                b':' => self.codegen.build_duplicate()?,
+                b'\\' => self.codegen.build_swap()?,
+                b'$' => self.codegen.build_pop_and_discard()?,
 
-                // static moves (don't worry about these JIT)
-                b'>' => state.direction = Direction::East,
-                b'<' => state.direction = Direction::West,
-                b'^' => state.direction = Direction::North,
-                b'v' => state.direction = Direction::South,
-                b'#' => state.step(program), // skip forwards one
+                // -- static direction changes
+                // (compilation can continue fine)
+                b'>' => self.position.direction = Direction::East,
+                b'<' => self.position.direction = Direction::West,
+                b'^' => self.position.direction = Direction::North,
+                b'v' => self.position.direction = Direction::South,
+                b'#' => self.step_position(), // skip forwards one
 
-                // dynamic moves (sorry JIT, we've gotta pause here)
-                // logic for where to go is handled later because the JIT
-                // doesn't know about runtime state
+                // -- dynamic direction changes
+                // (compilation pauses here, the outcome of the branch is not known until runtime)
                 b'?' | b'_' | b'|' => {
-                    self.build_return_pop_one()?;
+                    self.codegen.build_return_pop_one()?;
                     break;
                 }
 
                 // put (this is the big one!)
                 b'p' => {
-                    self.build_return_pop_three()?;
+                    self.codegen.build_return_pop_three()?;
                     break;
                 }
 
                 // get
                 b'g' => {
-                    self.build_return_pop_two()?;
+                    self.codegen.build_return_pop_two()?;
                     break;
                 }
 
                 // input
                 b'&' | b'~' => {
-                    self.build_return_zero()?;
+                    self.codegen.build_return_zero()?;
                     break;
                 }
 
                 // halt and debug operator
                 b'@' | b'q' => {
-                    self.build_return_stack_pointer()?;
+                    self.codegen.build_return_stack_pointer()?;
                     break;
                 }
 
-                // output
-                b'.' => self.build_printf_int(self.build_pop_stack()?)?,
-                b',' => self.build_printf_char(self.build_pop_stack()?)?,
+                // -- IO output
+                b'.' => self
+                    .codegen
+                    .build_printf_int(self.codegen.build_pop_stack()?)?,
+                b',' => self
+                    .codegen
+                    .build_printf_char(self.codegen.build_pop_stack()?)?,
 
                 // noop
                 b' ' => (),
 
                 char => panic!("UNKNOWN FUNC :( {:?}", char as char),
             }
-            state.step(program);
+            self.step_position();
             // TODO: put a debug info here
-            //self.printf_int(self.peek_stack());
+            //self.codegen.printf_int(self.codegen.peek_stack());
         }
 
         if PRINT_LLVM_IR {
@@ -802,130 +881,28 @@ impl<'ctx> CodeGen<'ctx> {
         // and call it ourselves
 
         let func = unsafe {
-            self.execution_engine
+            self.codegen
+                .execution_engine
                 .get_function(&func_name)
                 .expect("function name exists")
                 .into_raw()
         };
 
-        Ok((func, state, char))
+        Ok((func, char))
     }
 }
 
-fn get_stack_data(start: *const u64, end: *const u64) -> Vec<u64> {
+fn read_stack_from_ptr(start: *const u64, end: *const u64) -> Vec<u64> {
     let length = unsafe { end.offset_from(start) };
     if length < 0 {
         // stack must have underflowed...
-        // not good but also not our problem
+        // not good but also not our problem anymore
         Vec::new()
     } else {
         let length = length as usize;
-        let mut res = Vec::with_capacity(length);
-        for i in 0..length {
-            res.push(unsafe { *start.wrapping_add(i) });
-        }
-        res
+        let slice = unsafe { slice::from_raw_parts(start, length) };
+        slice.to_vec()
     }
-}
-
-fn main() -> Result<(), BefungeError> {
-    let context = Context::create();
-    let module = context.create_module("befunge");
-    // FIXME:
-    let execution_engine = module
-        .create_jit_execution_engine(OptimizationLevel::Aggressive)
-        .expect("what the freaaak");
-
-    let codegen = CodeGen {
-        context: &context,
-        module,
-        builder: context.create_builder(),
-        execution_engine,
-    };
-    codegen.build_prelude()?;
-    if PRINT_LLVM_IR {
-        println!(
-            "-- LLVM IR PRELUDE begin: \n{}-- LLVM IR PRELUDE end:\n",
-            codegen.module.print_to_string().to_string()
-        );
-    }
-    // https://github.com/Mikescher/BefungePrograms?tab=readme-ov-file
-    let windmill = r##"
-0".omed s"v                                          
-          "                       >v
-          i                        8
-                                   4
-          s             >       > ^*
-          i    >99+0g1+#^_77+0g#^_188+0p099+0p>  v
-          h    ^        <          #            <
-          T    >88+0g1+#^_66+0g#^_088+0p01-99+0p^
-          "    ^        <         <#             #<
->         v    >99+0g1-#^_77+0g8-#^_01-88+0p099+0p^
-|   >#:>#,<    ^        <         <#            <2
-               >88+0g1-#^_66+0g8-#^_088+0p199+0p^2
->0>:"#"\0p:5 v ^                   $             g
-v_^#!\+1\!`+4< ^p0+77+g0+99g0+77<  >66+0g1+v     v
->1-:"#"\v      >66+0g88+0g+66+0p^  v+1g0+77<     8
-|`0:p+19<      ^                   g             4
->:"#"\0\p:v>   ^<                  -             *
-|\+1\!`+45<^p0+<               v" "_"@"v         -
->1-:"#"\ v>p099^^     <        >66+v+66<         #
-|`0:p\+19<^0+88<^      p+1g0+77+1g0<       >" " #< v
-$>-66+0p077+0p1^ vp+2g0+67+2g0+56 < pp0+67:0+560<|#<
-01               :    #    v    p0 +76+1g< >"#" #< ^
->^               >65+0g6- #v_01-65+0p67+0^
-                      ^ $ <>76+0gv#
-                          ^     <> 7-v
-                                ^_v#!<
-                                  #
-                           >+56+0p^
-                           ^1g0+56<"##
-        .chars()
-        .skip(1)
-        .collect::<String>(); //skip first line :)
-    let countdown = r##"
-v       vg00p00<
-9    >:.>:.1-: |
-9    *         .
-9    *         5
-9    *         5
-9    * @789,,:+<
->99**^     "##
-        .chars()
-        .skip(1)
-        .collect::<String>();
-    let primes = r##"
-v     works for    0 < n < 1,373,653
- 
-
-
-  v                                                                                                              <<
-                                                                                                                 ,
-                                         >             >             >      >$0v                                 +
-                                                >             >              $1v                                 5
->0>1+:                              :2\`#^_:2-!#^_:2%!#^_:9\`#^_:3%!#^_:5%!#^_1 :v                               5
-                                    v\                      p13:+1g13:_v#-3 <p1 3<                               .
-                                    >:11p1-0\>:2% !#v_v    v ++!!+1-g< #    ^ <                                  :
-                                             ^\+1\/2< \    >3-#v_$$  1>31g\  !|>                                 |
-                                     vp01p03p04 g11p12<        >:*11v1 >$1   #$^                                 >^
-                                     >120pv        v%g04*<v-1\    %g<^ \!!-1:<$0 
-                                     vg030<  v-1\  < >10g^   >\:::*11  g%1-!\^>^ 
-                                         >$1\> :#v_ $ 21g >:#^_$1-!!  ^
-                                     >:!#^_\1+\2v\ ^_^#!%2/\g03p<
-                                     ^p02*2g02/ <>:*40g%20g2/:20^
-
-
-"##.chars().skip(1).collect::<String>();
-    let quine = r##">:# 0# g# ,# 1# +# 0#_ #! _0#1 "this crap writes itself!" #0 #_ #! _#0 :# 3# 5# *# 7# *# #?# %# _@"##;
-    let wasd = r##">~:,1-,@"##;
-    let program = Program::new(&countdown);
-    //let program = Program::new(&primes);
-    //let program = Program::new(&wasd);
-
-    let x = codegen.jit_befunge(program, None)?;
-    println!("final state: {x:?}");
-
-    Ok(())
 }
 
 #[cfg(test)]

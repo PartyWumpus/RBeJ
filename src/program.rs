@@ -61,20 +61,20 @@ impl Program {
         }
     }
 
+    pub const fn calc_index(loc: &Location, width: usize) -> usize {
+        loc.0 + loc.1 * (width + 1)
+    }
+
     fn new_from_file(file_path: &str) -> Self {
         let str = fs::read_to_string(file_path).expect("Should have been able to read the file");
         Self::new(&str)
-    }
-
-    pub const fn calc_index(&self, loc: &Location) -> usize {
-        loc.0 + loc.1 * (self.width + 1)
     }
 
     pub fn get(&self, loc: &Location) -> Option<u64> {
         if loc.0 > self.width || loc.1 > self.height {
             None
         } else {
-            let index = self.calc_index(loc);
+            let index = Self::calc_index(loc, self.width);
             Some(self.chars[index])
         }
     }
@@ -83,7 +83,7 @@ impl Program {
         if loc.0 > self.width || loc.1 > self.height {
             panic!("get {loc:?} is out of bounds");
         } else {
-            self.chars[self.calc_index(loc)]
+            self.chars[Self::calc_index(loc, self.width)]
         }
     }
 
@@ -92,7 +92,7 @@ impl Program {
             println!("put failed by the wayyy");
             false
         } else {
-            let index = self.calc_index(loc);
+            let index = Self::calc_index(loc, self.width);
             self.chars[index] = value;
             true
         }

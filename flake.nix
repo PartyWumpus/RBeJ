@@ -23,14 +23,12 @@
 				devShell = mkShell rec {
 					packages = [
 						rust-bin.stable.latest.default
-						#(rust-bin.fromRustupToolchainFile ./rust-toolchain)
 
             llvm_18
             libffi
             libxml2
             linuxPackages_latest.perf
 					];
-					#LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";
 				};
         shellHook = ''
           export RUSTFLAGS='-C target-cpu=native'
