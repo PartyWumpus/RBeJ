@@ -1,10 +1,11 @@
 [package]
-name = "befunging"
+name = "rbej"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 ahash = "0.8.11"
+clap = { version = "4.5.20", features = ["derive"] }
 #gxhash = "3.4.1"
 #inkwell = { path = "../inkwell", version = "0.5.0", features = ["llvm18-0"] }
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }

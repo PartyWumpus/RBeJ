@@ -1,5 +1,4 @@
 use rand_derive2::RandGen;
-use std::fs;
 
 #[derive(Copy, Clone, Debug, RandGen, Hash, PartialEq, Eq)]
 pub enum Direction {
@@ -18,24 +17,23 @@ pub struct Program {
     pub width: usize,
 }
 
-/*
-impl std::fmt::Debug for BefungeProgram {
+impl std::fmt::Debug for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Point")
-            .field(
-                "Chars",
-                &self
-                    .chars
-                    .chunks(self.width)
-                    .map(|x| x.iter().map(|x| *x as char).collect::<Vec<char>>())
-                    .collect::<Vec<Vec<char>>>(),
-            )
-            .field("Height", &self.height)
-            .field("Width", &self.width)
-            .finish()
+        write!(
+            f,
+            "{}",
+            &self
+                .chars
+                .chunks(self.width + 1)
+                .map(|x| {
+                    x.iter()
+                        .map(|x| char::from_u32(*x as u32).unwrap())
+                        .collect::<String>()
+                })
+                .fold(String::new(), |a, b| a + "\n" + &b),
+        )
     }
 }
-*/
 
 impl Program {
     pub fn new(str: &str) -> Self {
@@ -63,11 +61,6 @@ impl Program {
 
     pub const fn calc_index(loc: &Location, width: usize) -> usize {
         loc.0 + loc.1 * (width + 1)
-    }
-
-    fn new_from_file(file_path: &str) -> Self {
-        let str = fs::read_to_string(file_path).expect("Should have been able to read the file");
-        Self::new(&str)
     }
 
     pub fn get(&self, loc: &Location) -> Option<u64> {

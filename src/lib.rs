@@ -32,13 +32,11 @@ pub enum BefungeError {
 // TODO:
 // pop zero from stack when empty (and don't decrement stack counter)
 // catch stack overflow in llvm IR, and return if so?
-// read from file
 // cleanup function pointers n stuff currently they dangle i think
 // figure out a good debug info system
-// add a proper CLI interface or smth
+// allow file as positional arg as well as flag
 
-const STACK_SIZE: usize = 50;
-const PRINT_LLVM_IR: bool = false;
+const STACK_SIZE: usize = 500;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -55,7 +53,7 @@ struct CachedFunction {
 
 /// Current location and direction of execution
 /// Used as keys for getting cached compiled functions
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct BefungePosition {
     pub location: Location,
     pub direction: Direction,
@@ -104,6 +102,7 @@ impl FunctionCache {
 }
 
 struct CodeGen<'ctx> {
+    config: JitOptions,
     context: &'ctx Context,
     base_module: Module<'ctx>,
     builder: Builder<'ctx>,
@@ -111,13 +110,14 @@ struct CodeGen<'ctx> {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    fn new(context: &'ctx Context, opt_level: OptimizationLevel) -> Result<Self, BefungeError> {
+    fn new(context: &'ctx Context, config: &JitOptions) -> Result<Self, BefungeError> {
         let base_module = context.create_module("befunge");
         let execution_engine = base_module
-            .create_jit_execution_engine(opt_level)
-            .map_err(|err| BefungeError::JitInitializeFailure(err))?;
+            .create_jit_execution_engine(config.opt_level)
+            .map_err(BefungeError::JitInitializeFailure)?;
 
         let codegen = CodeGen {
+            config: config.clone(),
             builder: context.create_builder(),
             context,
             base_module,
@@ -125,7 +125,7 @@ impl<'ctx> CodeGen<'ctx> {
         };
         codegen.build_prelude()?;
 
-        if PRINT_LLVM_IR {
+        if config.print_llvm_ir {
             println!(
                 "-- LLVM IR PRELUDE begin: \n{}-- LLVM IR PRELUDE end:\n",
                 codegen.base_module.print_to_string().to_string()
@@ -165,6 +165,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.prelude_build_printf_int(printf)?;
         self.prelude_build_printf_char(printf)?;
         self.prelude_build_put_int()?;
+        self.prelude_build_get_stack()?;
         Ok(())
     }
 
@@ -216,6 +217,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn prelude_build_put_int(&self) -> Result<(), BefungeError> {
         let i64_type = self.context.i64_type();
         let func_type = self.context.void_type().fn_type(&[i64_type.into()], false);
+
         let function = self.base_module.add_function("put_int", func_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
@@ -225,6 +227,18 @@ impl<'ctx> CodeGen<'ctx> {
             .into_int_value();
         self.build_push_stack(val)?;
         self.builder.build_return(None)?;
+        Ok(())
+    }
+
+    fn prelude_build_get_stack(&self) -> Result<(), BefungeError> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let func_type = ptr_type.fn_type(&[], false);
+        let function = self
+            .base_module
+            .add_function("return_stack_ptr", func_type, None);
+        let basic_block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(basic_block);
+        self.build_return_stack_pointer()?;
         Ok(())
     }
 }
@@ -253,11 +267,20 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn get_put_int_fn_ptr(&self) -> PutIntFunc {
+    fn get_fn_ptr_put_int(&self) -> PutIntFunc {
         unsafe {
             self.execution_engine
                 .get_function("put_int")
                 .expect("put_int exists globally")
+                .into_raw()
+        }
+    }
+
+    fn get_fn_ptr_return_stack(&self) -> BefungeFunc {
+        unsafe {
+            self.execution_engine
+                .get_function("return_stack_ptr")
+                .expect("return_stack_ptr exists globally")
                 .into_raw()
         }
     }
@@ -592,6 +615,23 @@ impl<'ctx> CodeGen<'ctx> {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct JitOptions {
+    pub opt_level: OptimizationLevel,
+    pub print_llvm_ir: bool,
+    pub silent: bool,
+}
+
+impl Default for JitOptions {
+    fn default() -> Self {
+        Self {
+            opt_level: OptimizationLevel::Default,
+            print_llvm_ir: false,
+            silent: false,
+        }
+    }
+}
+
 pub struct JitCompiler<'ctx> {
     codegen: CodeGen<'ctx>,
     pub position: BefungePosition,
@@ -599,6 +639,8 @@ pub struct JitCompiler<'ctx> {
     visited: HashMap<Location, HashSet<BefungePosition>>,
     pub program: Program,
     put_int_func: PutIntFunc,
+    get_stack_func: BefungeFunc,
+    config: JitOptions,
 }
 
 /// JIT TIME
@@ -609,12 +651,17 @@ impl<'ctx> JitCompiler<'ctx> {
             self.program.height,
             self.position.direction,
             self.position.location,
-        )
+        );
     }
 
-    pub fn new(context: &'ctx Context, program: Program) -> Result<Self, BefungeError> {
-        let codegen = CodeGen::new(context, OptimizationLevel::Aggressive)?;
-        let put_int_func = codegen.get_put_int_fn_ptr();
+    pub fn new(
+        context: &'ctx Context,
+        program: Program,
+        opts: JitOptions,
+    ) -> Result<Self, BefungeError> {
+        let codegen = CodeGen::new(context, &opts)?;
+        let put_int_func = codegen.get_fn_ptr_put_int();
+        let get_stack_func = codegen.get_fn_ptr_return_stack();
 
         Ok(Self {
             codegen,
@@ -623,10 +670,12 @@ impl<'ctx> JitCompiler<'ctx> {
             function_cache: FunctionCache::new(program.width, program.height),
             program,
             put_int_func,
+            get_stack_func,
+            config: opts,
         })
     }
 
-    pub fn jit_befunge_to_completion(&mut self) -> Result<(), BefungeError> {
+    pub fn jit_to_completion(&mut self) -> Result<(), BefungeError> {
         loop {
             let finished = self.execute_some()?;
             if finished {
@@ -645,7 +694,7 @@ impl<'ctx> JitCompiler<'ctx> {
             last_char = cached_side_effects.last_char;
             self.position = cached_side_effects.pos_after;
         } else {
-            let start_pos = self.position.clone();
+            let start_pos = self.position;
             (func, last_char) = self.jit_expression()?;
             self.function_cache.set(
                 start_pos,
@@ -657,6 +706,11 @@ impl<'ctx> JitCompiler<'ctx> {
             );
         }
 
+        //println!("function run: {:?}", self.position);
+        //println!("{:?}", unsafe {
+        //    let x = *(self.codegen.get_fn_ptr_return_stack())();
+        //    read_stack_from_ptr(x.0 as *const u64, x.1 as *const u64)
+        //});
         let status = unsafe { *func() };
 
         match last_char {
@@ -850,31 +904,33 @@ impl<'ctx> JitCompiler<'ctx> {
                 }
 
                 // -- IO output
-                b'.' => self
-                    .codegen
-                    .build_printf_int(self.codegen.build_pop_stack()?)?,
-                b',' => self
-                    .codegen
-                    .build_printf_char(self.codegen.build_pop_stack()?)?,
+                b'.' => {
+                    if !self.config.silent {
+                        self.codegen
+                            .build_printf_int(self.codegen.build_pop_stack()?)?
+                    }
+                }
+                b',' => {
+                    if !self.config.silent {
+                        self.codegen
+                            .build_printf_char(self.codegen.build_pop_stack()?)?
+                    }
+                }
 
                 // noop
                 b' ' => (),
 
-                char => panic!("UNKNOWN FUNC :( {:?}", char as char),
+                char => return Err(BefungeError::InvalidInstruction(char.into())),
             }
             self.step_position();
-            // TODO: put a debug info here
-            //self.codegen.printf_int(self.codegen.peek_stack());
         }
 
-        if PRINT_LLVM_IR {
+        if self.config.print_llvm_ir {
             println!(
                 "-- LLVM IR begin: \n{}-- LLVM IR end:\n",
                 module.print_to_string().to_string()
             );
         }
-
-        //println!("{:?}", program);
 
         // inkwell provides no get_function by FunctionValue
         // so we will just pass around this FunctionValue
