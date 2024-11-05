@@ -102,7 +102,7 @@ impl FunctionCache {
 }
 
 struct CodeGen<'ctx> {
-    config: JitOptions,
+    config: JitConfig,
     context: &'ctx Context,
     base_module: Module<'ctx>,
     builder: Builder<'ctx>,
@@ -110,14 +110,14 @@ struct CodeGen<'ctx> {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    fn new(context: &'ctx Context, config: &JitOptions) -> Result<Self, BefungeError> {
+    fn new(context: &'ctx Context, config: &JitConfig) -> Result<Self, BefungeError> {
         let base_module = context.create_module("befunge");
         let execution_engine = base_module
             .create_jit_execution_engine(config.opt_level)
             .map_err(BefungeError::JitInitializeFailure)?;
 
         let codegen = CodeGen {
-            config: config.clone(),
+            config: *config,
             builder: context.create_builder(),
             context,
             base_module,
@@ -616,18 +616,20 @@ impl<'ctx> CodeGen<'ctx> {
 }
 
 #[derive(Copy, Clone)]
-pub struct JitOptions {
+pub struct JitConfig {
     pub opt_level: OptimizationLevel,
     pub print_llvm_ir: bool,
     pub silent: bool,
+    pub verbose: u8,
 }
 
-impl Default for JitOptions {
+impl Default for JitConfig {
     fn default() -> Self {
         Self {
             opt_level: OptimizationLevel::Default,
             print_llvm_ir: false,
             silent: false,
+            verbose: 0,
         }
     }
 }
@@ -640,7 +642,7 @@ pub struct JitCompiler<'ctx> {
     pub program: Program,
     put_int_func: PutIntFunc,
     get_stack_func: BefungeFunc,
-    config: JitOptions,
+    config: JitConfig,
 }
 
 /// JIT TIME
@@ -657,7 +659,7 @@ impl<'ctx> JitCompiler<'ctx> {
     pub fn new(
         context: &'ctx Context,
         program: Program,
-        opts: JitOptions,
+        opts: JitConfig,
     ) -> Result<Self, BefungeError> {
         let codegen = CodeGen::new(context, &opts)?;
         let put_int_func = codegen.get_fn_ptr_put_int();
@@ -694,6 +696,9 @@ impl<'ctx> JitCompiler<'ctx> {
             last_char = cached_side_effects.last_char;
             self.position = cached_side_effects.pos_after;
         } else {
+            if self.config.verbose >= 2 {
+                println!("generating uncached function. loc: {:?}", self.position);
+            };
             let start_pos = self.position;
             (func, last_char) = self.jit_expression()?;
             self.function_cache.set(
@@ -706,11 +711,13 @@ impl<'ctx> JitCompiler<'ctx> {
             );
         }
 
-        //println!("function run: {:?}", self.position);
-        //println!("{:?}", unsafe {
-        //    let x = *(self.codegen.get_fn_ptr_return_stack())();
-        //    read_stack_from_ptr(x.0 as *const u64, x.1 as *const u64)
-        //});
+        if self.config.verbose >= 3 {
+            println!("function run: {:?}", self.position);
+            println!("{:?}", unsafe {
+                let x = *(self.codegen.get_fn_ptr_return_stack())();
+                read_stack_from_ptr(x.0 as *const u64, x.1 as *const u64)
+            });
+        }
         let status = unsafe { *func() };
 
         match last_char {
@@ -822,7 +829,9 @@ impl<'ctx> JitCompiler<'ctx> {
                 .try_into()
                 .map_err(|_| BefungeError::InvalidInstruction(maybe_char))?;
 
-            //println!("op: {}, loc: {:?}", char as char, pos.location);
+            if self.config.verbose >= 3 {
+                println!("op: {}, loc: {:?}", char as char, self.position.location);
+            };
             match self.visited.get_mut(&self.position.location) {
                 None => {
                     let mut visitors = HashSet::default();
@@ -907,13 +916,13 @@ impl<'ctx> JitCompiler<'ctx> {
                 b'.' => {
                     if !self.config.silent {
                         self.codegen
-                            .build_printf_int(self.codegen.build_pop_stack()?)?
+                            .build_printf_int(self.codegen.build_pop_stack()?)?;
                     }
                 }
                 b',' => {
                     if !self.config.silent {
                         self.codegen
-                            .build_printf_char(self.codegen.build_pop_stack()?)?
+                            .build_printf_char(self.codegen.build_pop_stack()?)?;
                     }
                 }
 

@@ -1,8 +1,6 @@
-use std::io::sink;
-
 use clap::Parser;
 use inkwell::{context::Context, OptimizationLevel};
-use rbej::{BefungeError, JitCompiler, JitOptions, Program};
+use rbej::{BefungeError, JitCompiler, JitConfig, Program};
 
 fn to_opt_level(s: &str) -> Result<OptimizationLevel, String> {
     let opt_level: usize = s.parse().map_err(|_| format!("`{s}` isn't a number"))?;
@@ -26,8 +24,8 @@ struct Args {
     opt_level: OptimizationLevel,
 
     /// Print random debug information that is likely not useful
-    #[arg(short, long)]
-    verbose: bool,
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 
     /// Outputs LLVM IR after each function is generated
     #[arg(short, long)]
@@ -40,17 +38,18 @@ struct Args {
 
 fn main() -> Result<(), BefungeError> {
     let args = Args::parse();
-    if args.verbose {
+    if args.verbose >= 1 {
         println!("ARGS: {args:?}");
     }
 
     let str = std::fs::read_to_string(&args.filename).expect("Filename should exist");
     let program = Program::new(&str);
 
-    let opts = JitOptions {
+    let opts = JitConfig {
         opt_level: args.opt_level,
         print_llvm_ir: args.print_llvm_ir,
         silent: args.silent,
+        verbose: args.verbose,
     };
 
     let context = Context::create();
