@@ -43,7 +43,6 @@ fn main() -> Result<(), BefungeError> {
     }
 
     let str = std::fs::read_to_string(&args.filename).expect("Filename should exist");
-    let program = Program::new(&str);
 
     let opts = JitConfig {
         opt_level: args.opt_level,
@@ -53,7 +52,7 @@ fn main() -> Result<(), BefungeError> {
     };
 
     let context = Context::create();
-    let mut jitter = JitCompiler::new(&context, program, opts)?;
+    let mut jitter = JitCompiler::new(&context, &str, opts)?;
     jitter.jit_to_completion()?;
 
     Ok(())

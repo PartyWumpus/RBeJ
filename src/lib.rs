@@ -42,7 +42,12 @@ const STACK_SIZE: usize = 500;
 #[derive(Debug, Clone, Copy)]
 struct BefungeReturn(u64, u64, u64);
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct StackReturn(*const u64, *const u64);
+
 type BefungeFunc = unsafe extern "C" fn() -> *const BefungeReturn;
+type StackFunc = unsafe extern "C" fn() -> *const StackReturn;
 type PutIntFunc = unsafe extern "C" fn(u64) -> ();
 
 struct CachedFunction {
@@ -276,7 +281,7 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    fn get_fn_ptr_return_stack(&self) -> BefungeFunc {
+    fn get_fn_ptr_return_stack(&self) -> StackFunc {
         unsafe {
             self.execution_engine
                 .get_function("return_stack_ptr")
@@ -641,7 +646,7 @@ pub struct JitCompiler<'ctx> {
     visited: HashMap<Location, HashSet<BefungePosition>>,
     pub program: Program,
     put_int_func: PutIntFunc,
-    get_stack_func: BefungeFunc,
+    get_stack_func: StackFunc,
     config: JitConfig,
 }
 
@@ -656,14 +661,21 @@ impl<'ctx> JitCompiler<'ctx> {
         );
     }
 
+    pub fn get_stack(&self) -> Vec<u64> {
+        let x = unsafe { *(self.get_stack_func)() };
+        read_stack_from_ptr(x.0, x.1)
+    }
+
     pub fn new(
         context: &'ctx Context,
-        program: Program,
+        program_str: &str,
         opts: JitConfig,
     ) -> Result<Self, BefungeError> {
         let codegen = CodeGen::new(context, &opts)?;
         let put_int_func = codegen.get_fn_ptr_put_int();
         let get_stack_func = codegen.get_fn_ptr_return_stack();
+
+        let program = Program::new(program_str);
 
         Ok(Self {
             codegen,
@@ -713,10 +725,7 @@ impl<'ctx> JitCompiler<'ctx> {
 
         if self.config.verbose >= 3 {
             println!("function run: {:?}", self.position);
-            println!("{:?}", unsafe {
-                let x = *(self.codegen.get_fn_ptr_return_stack())();
-                read_stack_from_ptr(x.0 as *const u64, x.1 as *const u64)
-            });
+            println!("{:?}", self.get_stack());
         }
         let status = unsafe { *func() };
 
@@ -958,7 +967,7 @@ impl<'ctx> JitCompiler<'ctx> {
 }
 
 fn read_stack_from_ptr(start: *const u64, end: *const u64) -> Vec<u64> {
-    let length = unsafe { end.offset_from(start) };
+    let length = unsafe { end.offset_from(start) } + 1;
     if length < 0 {
         // stack must have underflowed...
         // not good but also not our problem anymore
@@ -972,10 +981,58 @@ fn read_stack_from_ptr(start: *const u64, end: *const u64) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    use std::error::Error;
+
     use super::*;
 
     #[test]
-    fn example() {
-        assert_eq!(5, 5);
+    fn number() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        let mut jitter = JitCompiler::new(&context, "9876543210@", JitConfig::default())?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(stack, vec![9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn string() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        let mut jitter = JitCompiler::new(&context, r#""test"@"#, JitConfig::default())?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(
+            stack,
+            "test".chars().map(|x| x as u64).collect::<Vec<u64>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maths() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        // (((9+9-5)*6)/3) = 26
+        let mut jitter = JitCompiler::new(&context, r"99+5-6*3/@", JitConfig::default())?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(stack, vec![26]);
+        Ok(())
+    }
+
+    #[test]
+    fn static_direction_changes() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        let code = r#"v
+> v
+  >   1    v
+>     4@   2
+^      3   <
+        "#;
+        let mut jitter = JitCompiler::new(&context, code, JitConfig::default())?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(stack, vec![1, 2, 3, 4]);
+        Ok(())
     }
 }
