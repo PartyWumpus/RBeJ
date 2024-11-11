@@ -12,7 +12,7 @@ pub enum Direction {
 pub struct Location(pub usize, pub usize);
 
 pub struct Program {
-    chars: Vec<u64>,
+    pub chars: Vec<u64>,
     pub height: usize,
     pub width: usize,
 }

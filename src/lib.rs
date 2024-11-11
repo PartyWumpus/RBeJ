@@ -30,11 +30,11 @@ pub enum BefungeError {
 }
 
 // TODO:
-// pop zero from stack when empty (and don't decrement stack counter)
 // catch stack overflow in llvm IR, and return if so?
 // cleanup function pointers n stuff currently they dangle i think
 // figure out a good debug info system
-// allow file as positional arg as well as flag
+// optimize _ and | by returning the value directly instead of a pointer as it should fit
+//  this is dubious, may technically be UB. profile it to see if it makes a real diff
 
 const STACK_SIZE: usize = 500;
 
@@ -378,32 +378,48 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(res)
     }
 
-    //TODO: If the stack counter is currently zero, we return zero instead of popping
-    fn build_pop_stack(&self) -> Result<IntValue<'_>, BefungeError> {
-        //let i64_type = self.context.i64_type();
+    // If the stack counter is currently zero, we return zero instead of popping
+    fn build_pop_stack(&self, func: FunctionValue) -> Result<IntValue<'_>, BefungeError> {
+        let i64_type = self.context.i64_type();
 
-        //let ptr = self.stack_counter_ptr();
+        let ptr = self.stack_counter_ptr();
 
-        //let stack_counter = self
-        //    .builder
-        //    .build_load(i64_type, ptr, "count")?
-        //    .into_int_value();
+        let stack_counter = self
+            .builder
+            .build_load(i64_type, ptr, "count")?
+            .into_int_value();
 
-        //let cond = self.builder.build_int_compare(
-        //    inkwell::IntPredicate::SLT,
-        //    stack_counter,
-        //    i64_type.const_zero(),
-        //    "iszero",
-        //);
+        let cond = self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            stack_counter,
+            i64_type.const_zero(),
+            "iszero",
+        )?;
 
-        //let zero_block = self.context.append_basic_block(func, "zero");
-        //let normal_block = self.context.append_basic_block(func, "nonzero");
-        //let cont_block = self.context.append_basic_block(func, "cont");
+        let empty_stack_block = self.context.append_basic_block(func, "zero");
+        let normal_block = self.context.append_basic_block(func, "nonzero");
+        let cont_block = self.context.append_basic_block(func, "cont");
 
-        let res = self.build_peek_stack()?;
+        self.builder
+            .build_conditional_branch(cond, empty_stack_block, normal_block)?;
+
+        self.builder.position_at_end(empty_stack_block);
+        self.builder.build_unconditional_branch(cont_block)?;
+
+        self.builder.position_at_end(normal_block);
+        let stack_val = self.build_peek_stack()?;
         self.build_decrement_stack_counter()?;
+        self.builder.build_unconditional_branch(cont_block)?;
 
-        Ok(res)
+        self.builder.position_at_end(cont_block);
+
+        let res = self.builder.build_phi(i64_type, "retval")?;
+        res.add_incoming(&[
+            (&stack_val, normal_block),
+            (&i64_type.const_zero(), empty_stack_block),
+        ]);
+
+        Ok(res.as_basic_value().into_int_value())
     }
 
     fn build_push_stack(&self, val: IntValue<'_>) -> Result<(), BefungeError> {
@@ -430,43 +446,43 @@ impl<'ctx> CodeGen<'ctx> {
 
     /// normal operations
 
-    fn build_addition(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_addition(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
 
         let res = self.builder.build_int_add(a, b, "add")?;
         self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn build_subtraction(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_subtraction(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
 
         let res = self.builder.build_int_sub(b, a, "sub")?;
         self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn build_multiplication(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_multiplication(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
         let res = self.builder.build_int_mul(b, a, "mult")?;
         self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn build_division(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_division(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
         let res = self.builder.build_int_signed_div(b, a, "div")?;
         self.build_push_stack(res)?;
         Ok(())
     }
 
-    fn build_modulo(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_modulo(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
         // FIXME: check what to do on negative/zero b!!
         let res = self.builder.build_int_signed_rem(b, a, "modulo")?;
         self.build_push_stack(res)?;
@@ -476,7 +492,7 @@ impl<'ctx> CodeGen<'ctx> {
     // if zero, set to 1, else set to zero
     fn build_not(&self, func: FunctionValue) -> Result<(), BefungeError> {
         let zero = self.context.i64_type().const_zero();
-        let a = self.build_pop_stack()?;
+        let a = self.build_pop_stack(func)?;
 
         let cond = self
             .builder
@@ -502,8 +518,8 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn build_greater_than(&self, func: FunctionValue) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
 
         let cond = self
             .builder
@@ -534,16 +550,16 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn build_swap(&self) -> Result<(), BefungeError> {
-        let a = self.build_pop_stack()?;
-        let b = self.build_pop_stack()?;
+    fn build_swap(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let a = self.build_pop_stack(func)?;
+        let b = self.build_pop_stack(func)?;
         self.build_push_stack(a)?;
         self.build_push_stack(b)?;
         Ok(())
     }
 
     fn build_pop_and_discard(&self) -> Result<(), BefungeError> {
-        self.build_pop_stack()?;
+        self.build_decrement_stack_counter()?;
         Ok(())
     }
 
@@ -567,29 +583,29 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    fn build_return_pop_three(&self) -> Result<(), BefungeError> {
-        let y = self.build_pop_stack()?;
-        let x = self.build_pop_stack()?;
-        let value = self.build_pop_stack()?;
+    fn build_return_pop_three(&self, func: FunctionValue) -> Result<(), BefungeError> {
+        let y = self.build_pop_stack(func)?;
+        let x = self.build_pop_stack(func)?;
+        let value = self.build_pop_stack(func)?;
 
         self.build_return_data(&[x, y, value])?;
         Ok(())
     }
 
-    fn build_return_pop_two(&self) -> Result<(), BefungeError> {
+    fn build_return_pop_two(&self, func: FunctionValue) -> Result<(), BefungeError> {
         let zero = self.context.i64_type().const_zero();
 
-        let y = self.build_pop_stack()?;
-        let x = self.build_pop_stack()?;
+        let y = self.build_pop_stack(func)?;
+        let x = self.build_pop_stack(func)?;
 
         self.build_return_data(&[x, y, zero])?;
         Ok(())
     }
 
-    fn build_return_pop_one(&self) -> Result<(), BefungeError> {
+    fn build_return_pop_one(&self, func: FunctionValue) -> Result<(), BefungeError> {
         let zero = self.context.i64_type().const_zero();
 
-        let x = self.build_pop_stack()?;
+        let x = self.build_pop_stack(func)?;
 
         self.build_return_data(&[x, zero, zero])?;
         Ok(())
@@ -768,7 +784,7 @@ impl<'ctx> JitCompiler<'ctx> {
                 }
             }
             b'p' => {
-                let BefungeReturn(y, x, value) = status;
+                let BefungeReturn(x, y, value) = status;
 
                 let loc = Location(x as usize, y as usize);
                 let success = self.program.set_if_valid(&loc, value);
@@ -781,7 +797,7 @@ impl<'ctx> JitCompiler<'ctx> {
                 };
             }
             b'g' => {
-                let BefungeReturn(y, x, _) = status;
+                let BefungeReturn(x, y, _) = status;
 
                 let val = self
                     .program
@@ -871,15 +887,15 @@ impl<'ctx> JitCompiler<'ctx> {
                     .build_push_static_number((char - b'0').into())?,
 
                 // -- normal operations
-                b'+' => self.codegen.build_addition()?,
-                b'-' => self.codegen.build_subtraction()?,
-                b'*' => self.codegen.build_multiplication()?,
-                b'/' => self.codegen.build_division()?,
-                b'%' => self.codegen.build_modulo()?,
+                b'+' => self.codegen.build_addition(function)?,
+                b'-' => self.codegen.build_subtraction(function)?,
+                b'*' => self.codegen.build_multiplication(function)?,
+                b'/' => self.codegen.build_division(function)?,
+                b'%' => self.codegen.build_modulo(function)?,
                 b'!' => self.codegen.build_not(function)?,
                 b'`' => self.codegen.build_greater_than(function)?,
                 b':' => self.codegen.build_duplicate()?,
-                b'\\' => self.codegen.build_swap()?,
+                b'\\' => self.codegen.build_swap(function)?,
                 b'$' => self.codegen.build_pop_and_discard()?,
 
                 // -- static direction changes
@@ -893,19 +909,19 @@ impl<'ctx> JitCompiler<'ctx> {
                 // -- dynamic direction changes
                 // (compilation pauses here, the outcome of the branch is not known until runtime)
                 b'?' | b'_' | b'|' => {
-                    self.codegen.build_return_pop_one()?;
+                    self.codegen.build_return_pop_one(function)?;
                     break;
                 }
 
                 // put (this is the big one!)
                 b'p' => {
-                    self.codegen.build_return_pop_three()?;
+                    self.codegen.build_return_pop_three(function)?;
                     break;
                 }
 
                 // get
                 b'g' => {
-                    self.codegen.build_return_pop_two()?;
+                    self.codegen.build_return_pop_two(function)?;
                     break;
                 }
 
@@ -925,13 +941,13 @@ impl<'ctx> JitCompiler<'ctx> {
                 b'.' => {
                     if !self.config.silent {
                         self.codegen
-                            .build_printf_int(self.codegen.build_pop_stack()?)?;
+                            .build_printf_int(self.codegen.build_pop_stack(function)?)?;
                     }
                 }
                 b',' => {
                     if !self.config.silent {
                         self.codegen
-                            .build_printf_char(self.codegen.build_pop_stack()?)?;
+                            .build_printf_char(self.codegen.build_pop_stack(function)?)?;
                     }
                 }
 
@@ -1033,6 +1049,42 @@ mod tests {
         jitter.jit_to_completion()?;
         let stack = jitter.get_stack();
         assert_eq!(stack, vec![1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn self_overwriting_func() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        let code = r#"v
+v         <
+   >"0"23p^
+> 5|
+   2
+   5
+   @
+        "#;
+        let mut jitter = JitCompiler::new(&context, code, JitConfig::default())?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(stack, vec![2, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn pop_zero_on_empty() -> Result<(), Box<dyn Error>> {
+        let context = Context::create();
+        let code = r#"!@"#;
+        let mut jitter = JitCompiler::new(
+            &context,
+            code,
+            JitConfig {
+                print_llvm_ir: true,
+                ..Default::default()
+            },
+        )?;
+        jitter.jit_to_completion()?;
+        let stack = jitter.get_stack();
+        assert_eq!(stack, vec![1]);
         Ok(())
     }
 }
