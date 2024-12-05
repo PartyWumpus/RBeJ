@@ -60,8 +60,8 @@ struct CachedFunction {
 /// Used as keys for getting cached compiled functions
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct BefungePosition {
-    pub location: Location,
     pub direction: Direction,
+    pub location: Location,
 }
 
 impl Default for BefungePosition {
@@ -523,7 +523,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         let cond = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, b, a, "isgreater")?;
+            .build_int_compare(inkwell::IntPredicate::SGT, b, a, "isgreater")?;
 
         let greater_block = self.context.append_basic_block(func, "a_greater");
         let not_greater_block = self.context.append_basic_block(func, "a_not_greater");
@@ -741,7 +741,6 @@ impl<'ctx> JitCompiler<'ctx> {
 
         if self.config.verbose >= 3 {
             println!("function run: {:?}", self.position);
-            println!("{:?}", self.get_stack());
         }
         let status = unsafe { *func() };
 
@@ -788,6 +787,9 @@ impl<'ctx> JitCompiler<'ctx> {
 
                 let loc = Location(x as usize, y as usize);
                 let success = self.program.set_if_valid(&loc, value);
+                if self.config.verbose >= 3 {
+                    println!("putting: {value} into {x}, {y}");
+                };
                 if success {
                     if let Some(visitors) = self.visited.get(&loc) {
                         for visitor in visitors {
@@ -803,6 +805,10 @@ impl<'ctx> JitCompiler<'ctx> {
                     .program
                     .get(&Location(x as usize, y as usize))
                     .unwrap_or_else(|| b' '.into());
+
+                if self.config.verbose >= 3 {
+                    println!("got {val} from {x}, {y}");
+                };
                 unsafe { (self.put_int_func)(val) };
             }
             b'&' => {
