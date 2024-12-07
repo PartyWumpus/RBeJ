@@ -82,7 +82,6 @@ impl Program {
 
     pub fn set_if_valid(&mut self, loc: &Location, value: u64) -> bool {
         if loc.0 > self.width || loc.1 > self.height {
-            println!("put failed by the wayyy");
             false
         } else {
             let index = Self::calc_index(loc, self.width);

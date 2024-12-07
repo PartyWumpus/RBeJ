@@ -804,7 +804,7 @@ impl<'ctx> JitCompiler<'ctx> {
                 let val = self
                     .program
                     .get(&Location(x as usize, y as usize))
-                    .unwrap_or_else(|| b' '.into());
+                    .unwrap_or(0);
 
                 if self.config.verbose >= 3 {
                     println!("got {val} from {x}, {y}");
